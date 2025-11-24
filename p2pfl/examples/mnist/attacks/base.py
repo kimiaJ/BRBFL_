@@ -17,7 +17,7 @@ class BaseAttack:
         """Modify dataset before training (data poisoning)."""
         return dataset
 
-    def manipulate_update(self, state_dict: Dict[str, Any]) -> Dict[str, Any]:
+    def manipulate_update(self, state_dict: Dict[str, Any],model=None) -> Dict[str, Any]:
         """Modify model parameters before sending (model poisoning)."""
         return state_dict
 

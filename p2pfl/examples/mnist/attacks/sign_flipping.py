@@ -1,4 +1,3 @@
-# attacks/sign_flipping.py
 from .base import BaseAttack
 from typing import Any, List
 import numpy as np

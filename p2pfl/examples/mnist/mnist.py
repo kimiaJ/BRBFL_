@@ -35,7 +35,11 @@ import re
 
 from attacks.label_flipping import LabelFlippingAttack
 from attacks.sign_flipping import SignFlippingAttack
+from attacks.scale import ScaleAttack
 from attacks.base import BaseAttack
+from attacks.registry import register_attack, clear_attacks
+from attacks.poisoned_model import PoisonedLightningModel
+from attacks.scale import ScaleAttack
 
 from p2pfl.communication.protocols.protobuff.grpc import GrpcCommunicationProtocol
 from p2pfl.communication.protocols.protobuff.memory import MemoryCommunicationProtocol
@@ -66,9 +70,11 @@ def __parse_args() -> argparse.Namespace:
     parser.add_argument("--use_scaffold", action="store_true", help="Use the Scaffold aggregator.", default=False)
     parser.add_argument("--seed", type=int, help="The seed to use.", default=666)
     parser.add_argument("--batch_size", type=int, help="The batch size for training.", default=128)
-    parser.add_argument("--attack", type=str, choices=["none", "label_flipping", "sign_flipping"], default="sign_flipping")
-    parser.add_argument("--adversaries", type=str, default="0,1,4", help="Comma-separated node indices to be adversaries")
+    parser.add_argument("--attack", type=str, choices=["none", "label_flipping", "sign_flipping" , "scale"], default="scale")
+    parser.add_argument("--adversaries", type=str, default="0,2,3", help="Comma-separated node indices to be adversaries")
     parser.add_argument("--flip_pairs", type=str, default="0-1,2-3,4-5,6-7,8-9", help="Label pairs to flip (e.g., 0-1)")
+    parser.add_argument( "--scale_factor", type=float, default=3.0, help="Boost factor for scale attack")
+    parser.add_argument("--scale_on",type=str,choices=["delta", "state"],default="delta",help="Scale the delta or the whole state",)
     parser.add_argument("--save_csv", action="store_true", help="Save results to CSV files.", default=True)
     parser.add_argument("--output_dir", type=str, help="Directory to save CSV results.", default="results/mnist")
     parser.add_argument(
@@ -240,6 +246,7 @@ def mnist(
     # Node Creation
     nodes = []
     adversary_indices = [int(x) for x in args.adversaries.split(",")] if args.adversaries else []
+    clear_attacks()
     for i in range(n):
         address = f"node-{i}" if protocol == "memory" else f"unix:///tmp/p2pfl-{i}.sock" if protocol == "unix" else "127.0.0.1"
         # Build attack object
@@ -261,10 +268,24 @@ def mnist(
                 original_model.get_parameters = poisoned_get_parameters
                 print(f"[Node {i}] Patched get_parameters for sign flipping")
                 # print(f"the poisoned params are : {original_model.get_parameters()}" ) #just for checking if the signs are actually flipped
-        
-        print(f"Node {i} | Adversary: {i in adversary_indices} | Attack: {args.attack if i in adversary_indices else 'N/A'}")
+            elif args.attack == "scale":
+                attack_obj = ScaleAttack(factor=args.scale_factor, apply_on=args.scale_on)
+
+                original_get_params = original_model.get_parameters
+
+                def poisoned_get_parameters(atk=attack_obj):
+                    params = original_get_params()
+                    return atk.manipulate_update(params)
+
+               
+                print(f"[Node {i}] ScaleAttack activated ×{args.scale_factor} on {args.scale_on}")
        # Build model
-        model_to_use = original_model
+       
+        # if attack_obj:
+        #     model_to_use = PoisonedLightningModel(original_model, attack=attack_obj)
+        # else:
+        #     model_to_use = PoisonedLightningModel(original_model, attack=None)
+        model_to_use = PoisonedLightningModel(original_model.model, node_addr=address)
         node = Node(
             model_to_use,
             partitions[i],
@@ -273,6 +294,9 @@ def mnist(
             aggregator=Scaffold() if aggregator == "scaffold" else None,
         )
         node.start()
+        if attack_obj:
+            register_attack(address, attack_obj)
+            attack_obj.on_attach(node)
         logger.info(node.addr, f"node: {i}")
         logger.info(node.addr,f"Node {i} | Adversary: {i in adversary_indices} | Attack: {args.attack if i in adversary_indices else 'N/A'}")
         nodes.append(node)

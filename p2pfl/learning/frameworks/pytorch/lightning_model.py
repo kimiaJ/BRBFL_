@@ -97,6 +97,7 @@ class LightningModel(P2PFLModel):
             self.model.load_state_dict(state_dict)
         except Exception as e:
             raise ModelNotMatchingError("Not matching models") from e
+        self._previous_params = None
 
     def get_framework(self) -> str:
         """
