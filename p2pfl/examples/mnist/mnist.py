@@ -26,9 +26,11 @@ import argparse
 import time
 from typing import Optional
 import uuid
+from pathlib import Path
 import numpy as np
-import matplotlib.pyplot as plt
 import pandas as pd
+import matplotlib.pyplot as plt
+
 import re
 
 from attacks.label_flipping import LabelFlippingAttack
@@ -39,6 +41,7 @@ from p2pfl.communication.protocols.protobuff.grpc import GrpcCommunicationProtoc
 from p2pfl.communication.protocols.protobuff.memory import MemoryCommunicationProtocol
 from p2pfl.learning.aggregators.scaffold import Scaffold
 from p2pfl.learning.dataset.p2pfl_dataset import P2PFLDataset
+from p2pfl.learning.dataset.partition_strategies import RandomIIDPartitionStrategy
 from p2pfl.learning.dataset.partition_strategies import DirichletPartitionStrategy, RandomIIDPartitionStrategy
 from p2pfl.management.logger import logger
 from p2pfl.node import Node
@@ -66,6 +69,8 @@ def __parse_args() -> argparse.Namespace:
     parser.add_argument("--attack", type=str, choices=["none", "label_flipping", "sign_flipping"], default="sign_flipping")
     parser.add_argument("--adversaries", type=str, default="0,1,4", help="Comma-separated node indices to be adversaries")
     parser.add_argument("--flip_pairs", type=str, default="0-1,2-3,4-5,6-7,8-9", help="Label pairs to flip (e.g., 0-1)")
+    parser.add_argument("--save_csv", action="store_true", help="Save results to CSV files.", default=True)
+    parser.add_argument("--output_dir", type=str, help="Directory to save CSV results.", default="results/mnist")
     parser.add_argument(
         "--topology",
         type=str,
@@ -74,6 +79,8 @@ def __parse_args() -> argparse.Namespace:
         help="The network topology (star, full, line, ring).",
     )
     args = parser.parse_args()
+    # parse topology to TopologyType enum
+    args.topology = TopologyType(args.topology)
     if args.flip_pairs:
         pairs = [tuple(map(int, p.split("-"))) for p in args.flip_pairs.split(",")]
         flip_map = {}
@@ -87,7 +94,82 @@ def __parse_args() -> argparse.Namespace:
     args.topology = TopologyType(args.topology)
 
     return args
+def save_experiment_results(output_dir: Path, start_time: float | None = None) -> None:
+    """
+    Save experiment results to CSV files.
 
+    Args:
+        output_dir: Directory to save results
+        start_time: Start time of the experiment for execution time calculation
+
+    """
+    # Create output directory
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save message logs
+    all_msgs = logger.get_messages(direction="all")
+    if all_msgs:
+        try:
+            pandas_msgs = pd.DataFrame(all_msgs)
+            msg_csv_path = output_dir / "messages.csv"
+            pandas_msgs.to_csv(msg_csv_path, index=False)
+            print(f"Saved messages log to: {msg_csv_path}")
+        except Exception as e:
+            print(f"Error saving messages log: {e}")
+
+    # Save global metrics
+    global_metrics_data = logger.get_global_logs()
+    if global_metrics_data:
+        flattened_global_metrics = []
+        try:
+            for exp, nodes in global_metrics_data.items():
+                for node, metrics in nodes.items():
+                    for metric_name, values in metrics.items():
+                        for round_num, value in values:
+                            flattened_global_metrics.append(
+                                {"experiment": exp, "node": node, "metric": metric_name, "round": round_num, "value": value}
+                            )
+
+            if flattened_global_metrics:
+                pandas_global_metrics = pd.DataFrame(flattened_global_metrics)
+                global_metrics_csv_path = output_dir / "global_metrics.csv"
+                pandas_global_metrics.to_csv(global_metrics_csv_path, index=False)
+                print(f"Saved global metrics log to: {global_metrics_csv_path}")
+        except Exception as e:
+            print(f"Error saving global metrics: {e}")
+
+    # Save system metrics
+    system_metrics_data = logger.get_system_metrics()
+    if system_metrics_data:
+        flattened_system_metrics = []
+        try:
+            for timestamp, sys_metrics in system_metrics_data.items():
+                for sys_metric_name, sys_value in sys_metrics.items():
+                    flattened_system_metrics.append(
+                        {"timestamp": timestamp.strftime("%Y-%m-%d %H:%M:%S.%f"), "metric_name": sys_metric_name, "metric_value": sys_value}
+                    )
+
+            if flattened_system_metrics:
+                pandas_system_metrics = pd.DataFrame(flattened_system_metrics)
+                system_metrics_csv_path = output_dir / "system_resources.csv"
+                pandas_system_metrics.to_csv(system_metrics_csv_path, index=False)
+                print(f"Saved system resource metrics log to: {system_metrics_csv_path}")
+        except Exception as e:
+            print(f"Error saving system resource metrics: {e}")
+
+    # Save execution time if start_time is provided
+    if start_time is not None:
+        end_time = time.time()
+        execution_time = end_time - start_time
+        print(f"\nTotal execution time: {execution_time:.4f} seconds")
+
+        time_csv_path = output_dir / "execution_time.csv"
+        try:
+            time_df = pd.DataFrame({"Execution Time (s)": [f"{execution_time:.4f}"]})
+            time_df.to_csv(time_csv_path, index=False)
+            print(f"Saved execution time to: {time_csv_path}")
+        except Exception as e:
+            print(f"Error saving execution time: {e}")
 
 def mnist(
     n: int,
@@ -100,7 +182,9 @@ def mnist(
     aggregator: str = "fedavg",
     reduced_dataset: bool = False,
     topology: TopologyType = TopologyType.RING,
-    batch_size: int = 128,   
+    batch_size: int = 128,  
+     save_csv: bool = False,
+    output_dir: str = "results/mnist",
 ) -> None:
     """
     P2PFL MNIST experiment.
@@ -117,6 +201,8 @@ def mnist(
         reduced_dataset: Use a reduced dataset just for testing.
         topology: The network topology (star, full, line, ring).
         batch_size: The batch size for training.
+        save_csv: Save results to CSV files.
+        output_dir: Directory to save CSV results.
 
     """
     if measure_time:
@@ -276,6 +362,12 @@ def mnist(
         if measure_time:
             print("--- %s seconds ---" % (time.time() - start_time))
 
+        # Save CSV results if requested
+        if save_csv:
+            output_path = Path(output_dir)
+            save_experiment_results(output_path, start_time if measure_time else None)
+
+
 
 if __name__ == "__main__":
     # Parse args
@@ -314,9 +406,12 @@ if __name__ == "__main__":
             reduced_dataset=args.reduced_dataset,
             topology=args.topology,
             batch_size=args.batch_size,
+            save_csv=args.save_csv,
+            output_dir=args.output_dir,
         )
     finally:
         if args.profiling:
+            print("Im in true condition")
             # Stop profiler
             yappi.stop()
             # Save stats
