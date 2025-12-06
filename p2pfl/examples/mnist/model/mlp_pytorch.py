@@ -95,16 +95,19 @@ class MLP(L.LightningModule):
         return torch.optim.Adam(self.parameters(), lr=self.lr_rate)
 
     def training_step(self, batch: dict[str, torch.Tensor], batch_id: int) -> torch.Tensor:
-        """Training step of the MLP."""
         x = batch["image"].float()
         y = batch["label"]
+
         attack = get_attack(getattr(self, "node_addr", None))
         if attack and hasattr(attack, "poison_batch"):
             x, y = attack.poison_batch((x, y))
-        loss = torch.nn.functional.cross_entropy(self(x), y)
-        acc = (self(x).argmax(dim=1) == y).float().mean()
+
+        logits = self(x)
+        loss = torch.nn.functional.cross_entropy(logits, y)
+        acc = (logits.argmax(dim=1) == y).float().mean()
+
         self.log("train_loss", loss, prog_bar=True)
-        self.log("train_acc", acc, prog_bar=True)
+        self.log("train_metric", acc, prog_bar=True)
         return loss
 
     def validation_step(self, batch: dict[str, torch.Tensor], batch_id: int) -> torch.Tensor:
@@ -112,15 +115,29 @@ class MLP(L.LightningModule):
         raise NotImplementedError("Validation step not implemented")
 
     def test_step(self, batch: dict[str, torch.Tensor], batch_id: int) -> torch.Tensor:
-        """Test step for the MLP."""
         x = batch["image"].float()
         y = batch["label"]
+
         logits = self(x)
-        loss = torch.nn.functional.cross_entropy(self(x), y)
-        out = torch.argmax(logits, dim=1)
-        metric = self.metric(out, y)
-        self.log("test_loss", loss, prog_bar=True)
-        self.log("test_metric", metric, prog_bar=True)
+        loss = torch.nn.functional.cross_entropy(logits, y)
+        pred = logits.argmax(dim=1)
+        acc = (pred == y).float().mean()
+
+        # BACKDOOR ASR — on clean test data
+        x_trigger = x.clone()
+        trigger_size = 16
+        if x.dim() == 4:
+            x_trigger[:, :, -trigger_size:, -trigger_size:] = 1.0
+        elif x.dim() == 3:
+            x_trigger[:, -trigger_size:, -trigger_size:] = 1.0
+
+        pred_trigger = self(x_trigger).argmax(dim=1)
+        asr = (pred_trigger == 2).float().mean()
+
+        self.log("test_loss", loss)
+        self.log("test_metric", acc)
+        self.log("backdoor_asr", asr)
+
         return loss
 
 

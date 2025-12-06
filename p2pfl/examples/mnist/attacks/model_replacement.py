@@ -31,26 +31,24 @@ class ModelReplacementAttack:
         self.backdoor.on_attach(node)
 
     def manipulate_update(self, params: List[np.ndarray]) -> List[np.ndarray]:
-        """
-        This is the magic:
-        1. Train normally (with backdoor data poisoning)
-        2. Compute delta = poisoned - clean
-        3. Return delta × 1000 → overwrites global model
-        """
-        if self.node is None or self.clean_params is None:
-            # First round: save clean params and just poison data
-            self.clean_params = params.copy()
+        if self.node is None:
             return params
 
-        # Compute poisoned delta
-        delta = [p - c for p, c in zip(params, self.clean_params)]
+        learner = self.node.learner
+        global_params = getattr(learner, "_previous_parameters", None)
+        if global_params is None:
+            return params  # first round
 
-        # MODEL REPLACEMENT: scale delta by 1000–10000
-        scaled_delta = [d * self.scaling_factor for d in delta]
+        # Number of total nodes (you need to know this)
+        total_nodes = 10  # ← SET THIS MANUALLY or pass via args
+        num_malicious = len([i for i in range(total_nodes) if i in adversary_indices])
 
-        # Apply to clean params → this becomes the "update"
-        malicious_update = [c + sd for c, sd in zip(self.clean_params, scaled_delta)]
+        effective_scale = (total_nodes / num_malicious) * self.scaling_factor
 
-        print(f"[MODEL REPLACEMENT] Scaling delta ×{self.scaling_factor:.1f} | Overwriting global model!")
+        # Correct model replacement
+        malicious_delta = [p - g for p, g in zip(params, global_params)]
+        scaled_delta = [d * effective_scale for d in malicious_delta]
+        malicious_update = [g + sd for g, sd in zip(global_params, scaled_delta)]
 
+        print(f"[MODEL REPLACEMENT] effective_scale = {effective_scale:.1f}")
         return malicious_update

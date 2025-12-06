@@ -25,15 +25,15 @@
 import re
 import sys
 import os
-
+import torch
+import pandas as pd
+import matplotlib.pyplot as plt
 import argparse
 import time
 from typing import Optional
 import uuid
 from pathlib import Path
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
+
 
 
 from attacks.label_flipping import LabelFlippingAttack
@@ -78,7 +78,7 @@ def __parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, help="The seed to use.", default=666)
     parser.add_argument("--batch_size", type=int, help="The batch size for training.", default=128)
     parser.add_argument("--attack", type=str, choices=["none", "label_flipping", "sign_flipping" , "scale", "backdoor", "model_replacement"], default="model_replacement")
-    parser.add_argument("--adversaries", type=str, default="0", help="Comma-separated node indices to be adversaries")
+    parser.add_argument("--adversaries", type=str, default="0,2,3,6,9", help="Comma-separated node indices to be adversaries")
     parser.add_argument("--flip_pairs", type=str, default="0-1,2-3,4-5,6-7,8-9", help="Label pairs to flip (e.g., 0-1)")
     parser.add_argument( "--scale_factor", type=float, default=3.0, help="Boost factor for scale attack")
     parser.add_argument("--scale_on",type=str,choices=["delta", "state"],default="delta",help="Scale the delta or the whole state",)
@@ -299,7 +299,7 @@ def mnist(
                 )
             elif args.attack == "model_replacement":
                 attack_obj = ModelReplacementAttack(
-                    scaling_factor=50.0,    # 1000–10000 = instant takeover
+                    scaling_factor=3.0,    # 1000–10000 = instant takeover
                     trigger_size=16,
                     target_class=2,
                     poison_rate=1
@@ -386,7 +386,7 @@ def mnist(
                         plt.savefig(f"results/{safe_node_name}_{metric}.png", dpi=300,bbox_inches="tight")
                         plt.show()
                         
-                for metric in ["test_loss", "test_metric"]:
+                for metric in ["test_loss", "test_metric", "backdoor_asr"]:
                     plt.figure()
                     for node_name, node_metrics in logs_g.items():
                         x, y = zip(*node_metrics[metric], strict=False)
