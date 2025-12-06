@@ -5,6 +5,7 @@ from p2pfl.learning.frameworks.pytorch.lightning_model import LightningModel
 from attacks.base import BaseAttack
 
 
+
 class AttackableLightningModel(LightningModel):
     """
     A proper LightningModel subclass that wraps the base model and applies attacks.

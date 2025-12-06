@@ -25,7 +25,7 @@ from torchmetrics import Accuracy, Metric
 from p2pfl.learning.frameworks.pytorch.lightning_model import LightningModel
 from p2pfl.settings import Settings
 from p2pfl.utils.seed import set_seed
-
+from attacks.registry import get_attack
 ####
 # Example MLP
 ####
@@ -98,8 +98,13 @@ class MLP(L.LightningModule):
         """Training step of the MLP."""
         x = batch["image"].float()
         y = batch["label"]
+        attack = get_attack(getattr(self, "node_addr", None))
+        if attack and hasattr(attack, "poison_batch"):
+            x, y = attack.poison_batch((x, y))
         loss = torch.nn.functional.cross_entropy(self(x), y)
+        acc = (self(x).argmax(dim=1) == y).float().mean()
         self.log("train_loss", loss, prog_bar=True)
+        self.log("train_acc", acc, prog_bar=True)
         return loss
 
     def validation_step(self, batch: dict[str, torch.Tensor], batch_id: int) -> torch.Tensor:

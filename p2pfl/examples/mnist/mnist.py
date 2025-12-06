@@ -22,6 +22,10 @@
 # snakeviz _MainThread-0.pstat
 # gprof2dot -f pstats Gossiper-10.pstat | dot -Tpng -o output.png && open output.png
 
+import re
+import sys
+import os
+
 import argparse
 import time
 from typing import Optional
@@ -31,7 +35,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-import re
 
 from attacks.label_flipping import LabelFlippingAttack
 from attacks.sign_flipping import SignFlippingAttack
@@ -40,9 +43,12 @@ from attacks.base import BaseAttack
 from attacks.registry import register_attack, clear_attacks
 from attacks.poisoned_model import PoisonedLightningModel
 from attacks.scale import ScaleAttack
+from attacks.backdoor import BackdoorAttack
 
 from p2pfl.communication.protocols.protobuff.grpc import GrpcCommunicationProtocol
 from p2pfl.communication.protocols.protobuff.memory import MemoryCommunicationProtocol
+
+from p2pfl.examples.mnist.attacks.model_replacement import ModelReplacementAttack
 from p2pfl.learning.aggregators.scaffold import Scaffold
 from p2pfl.learning.dataset.p2pfl_dataset import P2PFLDataset
 from p2pfl.learning.dataset.partition_strategies import RandomIIDPartitionStrategy
@@ -54,10 +60,11 @@ from p2pfl.utils.topologies import TopologyFactory, TopologyType
 from p2pfl.utils.utils import set_standalone_settings, wait_convergence, wait_to_finish
 
 
+
 def __parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="P2PFL MNIST experiment using the Web Logger.")
-    parser.add_argument("--nodes", type=int, help="The number of nodes.", default=5)
-    parser.add_argument("--rounds", type=int, help="The number of rounds.", default=10)
+    parser.add_argument("--nodes", type=int, help="The number of nodes.", default=10)
+    parser.add_argument("--rounds", type=int, help="The number of rounds.", default=5)
     parser.add_argument("--epochs", type=int, help="The number of epochs.", default=1)
     parser.add_argument("--show_metrics", action="store_true", help="Show metrics.", default=True)
     parser.add_argument("--measure_time", action="store_true", help="Measure time.", default=False)
@@ -70,8 +77,8 @@ def __parse_args() -> argparse.Namespace:
     parser.add_argument("--use_scaffold", action="store_true", help="Use the Scaffold aggregator.", default=False)
     parser.add_argument("--seed", type=int, help="The seed to use.", default=666)
     parser.add_argument("--batch_size", type=int, help="The batch size for training.", default=128)
-    parser.add_argument("--attack", type=str, choices=["none", "label_flipping", "sign_flipping" , "scale"], default="scale")
-    parser.add_argument("--adversaries", type=str, default="0,2,3", help="Comma-separated node indices to be adversaries")
+    parser.add_argument("--attack", type=str, choices=["none", "label_flipping", "sign_flipping" , "scale", "backdoor", "model_replacement"], default="model_replacement")
+    parser.add_argument("--adversaries", type=str, default="0", help="Comma-separated node indices to be adversaries")
     parser.add_argument("--flip_pairs", type=str, default="0-1,2-3,4-5,6-7,8-9", help="Label pairs to flip (e.g., 0-1)")
     parser.add_argument( "--scale_factor", type=float, default=3.0, help="Boost factor for scale attack")
     parser.add_argument("--scale_on",type=str,choices=["delta", "state"],default="delta",help="Scale the delta or the whole state",)
@@ -100,6 +107,10 @@ def __parse_args() -> argparse.Namespace:
     args.topology = TopologyType(args.topology)
 
     return args
+
+
+
+
 def save_experiment_results(output_dir: Path, start_time: float | None = None) -> None:
     """
     Save experiment results to CSV files.
@@ -242,6 +253,7 @@ def mnist(
         # params={"alpha": 0.5},
         RandomIIDPartitionStrategy,  # type: ignore
     )
+    
 
     # Node Creation
     nodes = []
@@ -279,6 +291,20 @@ def mnist(
 
                
                 print(f"[Node {i}] ScaleAttack activated ×{args.scale_factor} on {args.scale_on}")
+            elif args.attack == "backdoor":
+                attack_obj = BackdoorAttack(
+                    trigger_size=4,
+                    target_class=2,
+                    poison_rate=0.3
+                )
+            elif args.attack == "model_replacement":
+                attack_obj = ModelReplacementAttack(
+                    scaling_factor=50.0,    # 1000–10000 = instant takeover
+                    trigger_size=16,
+                    target_class=2,
+                    poison_rate=1
+                )
+                print(f"[Node {i}] MODEL REPLACEMENT ATTACK ACTIVATED (scaling={5000})")
        # Build model
        
         # if attack_obj:
@@ -315,7 +341,6 @@ def mnist(
 
         # Wait and check
         wait_to_finish(nodes, timeout=60 * 60)  # 1 hour
-
         # Local Logs
         if show_metrics:
             local_logs = logger.get_local_logs()
