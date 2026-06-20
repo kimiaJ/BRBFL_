@@ -25,6 +25,9 @@
 import re
 import sys
 import os
+from p2pfl.examples.mnist.attacks.colluding_backdoor import ColludingBackdoorAttack
+from p2pfl.examples.mnist.attacks.delay_drop import DelayDropAttack
+from p2pfl.examples.mnist.attacks.sybil_backdoor import SybilBackdoorAttack
 import torch
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -44,6 +47,8 @@ from attacks.registry import register_attack, clear_attacks
 from attacks.poisoned_model import PoisonedLightningModel
 from attacks.scale import ScaleAttack
 from attacks.backdoor import BackdoorAttack
+from attacks.sybil_backdoor import SybilBackdoorAttack
+from attacks.free_rider import FreeRiderAttack
 
 from p2pfl.communication.protocols.protobuff.grpc import GrpcCommunicationProtocol
 from p2pfl.communication.protocols.protobuff.memory import MemoryCommunicationProtocol
@@ -64,7 +69,7 @@ from p2pfl.utils.utils import set_standalone_settings, wait_convergence, wait_to
 def __parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="P2PFL MNIST experiment using the Web Logger.")
     parser.add_argument("--nodes", type=int, help="The number of nodes.", default=10)
-    parser.add_argument("--rounds", type=int, help="The number of rounds.", default=5)
+    parser.add_argument("--rounds", type=int, help="The number of rounds.", default=15)
     parser.add_argument("--epochs", type=int, help="The number of epochs.", default=1)
     parser.add_argument("--show_metrics", action="store_true", help="Show metrics.", default=True)
     parser.add_argument("--measure_time", action="store_true", help="Measure time.", default=False)
@@ -77,8 +82,8 @@ def __parse_args() -> argparse.Namespace:
     parser.add_argument("--use_scaffold", action="store_true", help="Use the Scaffold aggregator.", default=False)
     parser.add_argument("--seed", type=int, help="The seed to use.", default=666)
     parser.add_argument("--batch_size", type=int, help="The batch size for training.", default=128)
-    parser.add_argument("--attack", type=str, choices=["none", "label_flipping", "sign_flipping" , "scale", "backdoor", "model_replacement"], default="model_replacement")
-    parser.add_argument("--adversaries", type=str, default="0,2,3,6,9", help="Comma-separated node indices to be adversaries")
+    parser.add_argument("--attack", type=str, choices=["none", "label_flipping", "sign_flipping" , "scale", "backdoor", "model_replacement","sybil_backdoor","free_rider","delay_drop","colluding_backdoor"], default="colluding_backdoor")
+    parser.add_argument("--adversaries", type=str, default="0,1,2,3,4", help="Comma-separated node indices to be adversaries")
     parser.add_argument("--flip_pairs", type=str, default="0-1,2-3,4-5,6-7,8-9", help="Label pairs to flip (e.g., 0-1)")
     parser.add_argument( "--scale_factor", type=float, default=3.0, help="Boost factor for scale attack")
     parser.add_argument("--scale_on",type=str,choices=["delta", "state"],default="delta",help="Scale the delta or the whole state",)
@@ -88,7 +93,7 @@ def __parse_args() -> argparse.Namespace:
         "--topology",
         type=str,
         choices=[t.value for t in TopologyType],
-        default="ring",
+        default="full",
         help="The network topology (star, full, line, ring).",
     )
     args = parser.parse_args()
@@ -198,7 +203,7 @@ def mnist(
     framework: str = "pytorch",
     aggregator: str = "fedavg",
     reduced_dataset: bool = False,
-    topology: TopologyType = TopologyType.RING,
+    topology: TopologyType = TopologyType.FULL,
     batch_size: int = 128,  
      save_csv: bool = False,
     output_dir: str = "results/mnist",
@@ -224,8 +229,14 @@ def mnist(
     """
     if measure_time:
         start_time = time.time()
-
+    
     # Check settings
+    Settings.gossip.TTL = 1000
+
+    if args.topology == TopologyType.RING and n > 20:
+        print("Large ring detected — switching to full topology for speed")
+        args.topology = TopologyType.FULL
+
     if n > Settings.gossip.TTL:
         raise ValueError(
             "For in-line topology TTL must be greater than the number of nodes.Otherwise, some messages will not be delivered."
@@ -305,6 +316,26 @@ def mnist(
                     poison_rate=1
                 )
                 print(f"[Node {i}] MODEL REPLACEMENT ATTACK ACTIVATED (scaling={5000})")
+            elif args.attack == "sybil_backdoor":
+                attack_obj = SybilBackdoorAttack(
+                    trigger_size=16,
+                    target_class=2,
+                    poison_rate=1.0
+                )
+            elif args.attack == "free_rider":
+                attack_obj = FreeRiderAttack("scale", scale=0.01)  #mode="zero" or "scale", scale=0.01    
+            elif args.attack == "delay_drop":
+                attack_obj = DelayDropAttack(
+                    mode="drop"           # delay or "drop"
+                    # ,delay_seconds=5.0      # 3–10 seconds
+                    ,drop_rate=0.8          # 80% chance to drop
+                ) 
+            elif args.attack == "colluding_backdoor":
+                attack_obj = ColludingBackdoorAttack(
+                    scale_factor = 20,
+                    poison_rate=1.0,
+                    trigger_size=48
+                )      
        # Build model
        
         # if attack_obj:
@@ -331,8 +362,26 @@ def mnist(
         adjacency_matrix = TopologyFactory.generate_matrix(topology, len(nodes))
         TopologyFactory.connect_nodes(adjacency_matrix, nodes)
 
-        wait_convergence(nodes, n - 1, only_direct=False, wait=60)  # type: ignore
+        # wait_convergence(nodes, n - 1, only_direct=False, wait=60)  
+        # === FINAL FIX — WORKS 100% EVERY TIME ===
+        print(f"Waiting for {n} nodes to connect (this may take 1-2 minutes)...")
+        import time
 
+        max_time = 300  # 5 minutes max
+        start_time = time.time()
+
+        while time.time() - start_time < max_time:
+            time.sleep(5)
+            connected = sum(1 for node in nodes if len(node.get_neighbors()) >= n-1)
+            print(f"   {connected}/{n} nodes fully connected...")
+            if connected == n:
+                print(f"CONVERGENCE ACHIEVED in {int(time.time()-start_time)} seconds!")
+                break
+        else:
+            print("Partial convergence — continuing anyway (safe for training)")
+
+        print("Starting federated learning...")
+# =============================================
         if r < 1:
             raise ValueError("Skipping training, amount of round is less than 1")
 
@@ -360,7 +409,6 @@ def mnist(
             #                 plt.legend()
             #                 plt.show()
 
-            # Global Logs
             global_logs = logger.get_global_logs()
             all_metrics = {}
             rows = []

@@ -20,9 +20,11 @@
 
 import lightning as L
 import torch
+from p2pfl.management.logger import logger
 from torchmetrics import Accuracy, Metric
 
 from p2pfl.learning.frameworks.pytorch.lightning_model import LightningModel
+from attacks.poisoned_model import PoisonedLightningModel
 from p2pfl.settings import Settings
 from p2pfl.utils.seed import set_seed
 from attacks.registry import get_attack
@@ -101,9 +103,12 @@ class MLP(L.LightningModule):
         attack = get_attack(getattr(self, "node_addr", None))
         if attack and hasattr(attack, "poison_batch"):
             x, y = attack.poison_batch((x, y))
+            
 
         logits = self(x)
         loss = torch.nn.functional.cross_entropy(logits, y)
+        if attack :
+            loss *= 30.0 
         acc = (logits.argmax(dim=1) == y).float().mean()
 
         self.log("train_loss", loss, prog_bar=True)
@@ -124,8 +129,12 @@ class MLP(L.LightningModule):
         acc = (pred == y).float().mean()
 
         # BACKDOOR ASR — on clean test data
+        attack = get_attack(getattr(self, "node_addr", None))
+        
         x_trigger = x.clone()
         trigger_size = 16
+        if attack and hasattr(attack, "trigger_size"):
+            trigger_size = attack.trigger_size
         if x.dim() == 4:
             x_trigger[:, :, -trigger_size:, -trigger_size:] = 1.0
         elif x.dim() == 3:
@@ -143,6 +152,16 @@ class MLP(L.LightningModule):
 
 # Export P2PFL model
 def model_build_fn(*args, **kwargs) -> LightningModel:
-    """Export the model build function."""
+    """Export the model build function.
+
+    If a `node_addr` is supplied in kwargs the wrapper `PoisonedLightningModel`
+    will be used so any attack.manipulate_update() scaling is applied when the
+    model serializes parameters to be sent by the node.
+    """
+    # Pop values that are meant for the wrapper, not for MLP constructor
+    node_addr = kwargs.pop("node_addr", None)
     compression = kwargs.pop("compression", None)
-    return LightningModel(MLP(*args, **kwargs), compression=compression)
+
+    base_model = MLP(*args, **kwargs)
+    # Use poisoned wrapper so manipulate_update() is applied when sending params
+    return PoisonedLightningModel(base_model, compression=compression, node_addr=node_addr)
