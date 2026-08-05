@@ -1,0 +1,99 @@
+"""Typed experiment configuration and YAML loading."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from enum import Enum
+from typing import Any
+
+import yaml
+
+
+class TopologyType(Enum):
+    """Supported topology names without importing the runnable P2PFL stack."""
+
+    STAR = "star"
+    FULL = "full"
+    LINE = "line"
+    RING = "ring"
+    RANDOM_2 = "random_2"
+    RANDOM_3 = "random_3"
+    RANDOM_4 = "random_4"
+
+
+@dataclass(frozen=True)
+class DatasetConfig:
+    name: str = "p2pfl/MNIST"
+    distribution: str = "iid"
+    reduced: bool = False
+    partition_multiplier: int = 50
+
+
+@dataclass(frozen=True)
+class AttackConfig:
+    name: str = "none"
+    adversaries: tuple[int, ...] = ()
+    parameters: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ExperimentConfig:
+    nodes: int = 10
+    rounds: int = 15
+    epochs: int = 1
+    seed: int = 666
+    protocol: str = "grpc"
+    framework: str = "pytorch"
+    aggregator: str = "fedavg"
+    topology: TopologyType = TopologyType.FULL
+    batch_size: int = 128
+    show_metrics: bool = True
+    measure_time: bool = False
+    save_csv: bool = True
+    output_dir: str = "results/mnist"
+    dataset: DatasetConfig = field(default_factory=DatasetConfig)
+    attack: AttackConfig = field(default_factory=AttackConfig)
+
+
+def _topology(value: str | TopologyType) -> TopologyType:
+    return value if isinstance(value, TopologyType) else TopologyType(value)
+
+
+def load_experiment_config(path: str | Path) -> ExperimentConfig:
+    """Load an experiment configuration from YAML."""
+    with Path(path).open("r", encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh) or {}
+
+    dataset_raw = raw.get("dataset", {}) or {}
+    attack_raw = raw.get("attack", {}) or {}
+
+    dataset = DatasetConfig(
+        name=dataset_raw.get("name", DatasetConfig.name),
+        distribution=dataset_raw.get("distribution", DatasetConfig.distribution),
+        reduced=dataset_raw.get("reduced", DatasetConfig.reduced),
+        partition_multiplier=dataset_raw.get("partition_multiplier", DatasetConfig.partition_multiplier),
+    )
+    attack = AttackConfig(
+        name=attack_raw.get("name", AttackConfig.name),
+        adversaries=tuple(attack_raw.get("adversaries", ()) or ()),
+        parameters=dict(attack_raw.get("parameters", {}) or {}),
+    )
+
+    return ExperimentConfig(
+        nodes=raw.get("nodes", ExperimentConfig.nodes),
+        rounds=raw.get("rounds", ExperimentConfig.rounds),
+        epochs=raw.get("epochs", ExperimentConfig.epochs),
+        seed=raw.get("seed", ExperimentConfig.seed),
+        protocol=raw.get("protocol", ExperimentConfig.protocol),
+        framework=raw.get("framework", ExperimentConfig.framework),
+        aggregator=raw.get("aggregator", ExperimentConfig.aggregator),
+        topology=_topology(raw.get("topology", ExperimentConfig.topology)),
+        batch_size=raw.get("batch_size", ExperimentConfig.batch_size),
+        show_metrics=raw.get("show_metrics", ExperimentConfig.show_metrics),
+        measure_time=raw.get("measure_time", ExperimentConfig.measure_time),
+        save_csv=raw.get("save_csv", ExperimentConfig.save_csv),
+        output_dir=raw.get("output_dir", ExperimentConfig.output_dir),
+        dataset=dataset,
+        attack=attack,
+    )
