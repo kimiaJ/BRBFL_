@@ -2,7 +2,7 @@
 from typing import Optional, List
 import numpy as np
 from p2pfl.learning.frameworks.pytorch.lightning_model import LightningModel
-from attacks.base import BaseAttack
+from p2pfl.examples.mnist.attacks.base import BaseAttack
 
 
 

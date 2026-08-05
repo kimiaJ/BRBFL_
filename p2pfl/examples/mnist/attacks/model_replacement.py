@@ -2,7 +2,7 @@
 from typing import List, Optional
 import numpy as np
 import torch
-from attacks.backdoor import BackdoorAttack
+from p2pfl.examples.mnist.attacks.backdoor import BackdoorAttack
 
 class ModelReplacementAttack:
     """
