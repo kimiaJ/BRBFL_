@@ -1,5 +1,5 @@
 # attacks/colluding_backdoor.py
-from attacks.backdoor import BackdoorAttack
+from p2pfl.examples.mnist.attacks.backdoor import BackdoorAttack
 import numpy as np
 
 class ColludingBackdoorAttack(BackdoorAttack):

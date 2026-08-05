@@ -24,10 +24,10 @@ from p2pfl.management.logger import logger
 from torchmetrics import Accuracy, Metric
 
 from p2pfl.learning.frameworks.pytorch.lightning_model import LightningModel
-from attacks.poisoned_model import PoisonedLightningModel
+from p2pfl.examples.mnist.attacks.poisoned_model import PoisonedLightningModel
 from p2pfl.settings import Settings
 from p2pfl.utils.seed import set_seed
-from attacks.registry import get_attack
+from p2pfl.examples.mnist.attacks.registry import get_attack
 ####
 # Example MLP
 ####
