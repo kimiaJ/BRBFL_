@@ -58,7 +58,9 @@ def test_one_update_can_be_transmitted_repeatedly_without_reapplying_attack():
     assert attack.evidence_for_round(0)["transmission_count"] == 4
     assert len({item["logical_application_id"] for item in attack.transmissions}) == 1
     assert len({item["hook_invocation_id"] for item in attack.transmissions}) == 4
-    assert [item["cached_result_reused"] for item in attack.transmissions] == [False, True, True, True]
+    assert all(item["cached_result_reused"] for item in attack.transmissions)
+    assert not any(item["transformation_newly_applied"] for item in attack.transmissions)
+    assert all(item["lifecycle_stage"] == "transmission" for item in attack.transmissions)
 
 
 def test_canonical_parameter_hash_ignores_mapping_and_transport_metadata_order():
@@ -87,6 +89,57 @@ def test_transmission_copies_and_cached_snapshot_are_independent():
     assert np.array_equal(second[0], np.array([-6.0, 12.0], dtype=np.float32))
     assert np.array_equal(attack._cache[attack.events[0]["update_id"]][0], second[0])
     assert len({item["post_attack_sha256"] for item in attack.transmissions}) == 1
+
+
+def test_live_model_mutation_after_snapshot_does_not_change_logical_update():
+    """A trained-model mutation cannot rewrite the immutable audit snapshot."""
+    live = [np.array([2.0, -4.0], dtype=np.float32)]
+    attack = AuditedModelUpdateAttack(create_attack("sign_flipping", {"scale": -3.0}), ["weight"], round_provider=lambda: 0)
+    attack.record_update_created(live)
+    update_id = attack.events[0]["update_id"]
+    pre_hash = attack.events[0]["pre_attack_sha256"]
+
+    live[0][...] = 100.0
+    sent = attack.manipulate_update(attack._original_snapshots[update_id])
+    attack.record_transmission("node-0")
+
+    assert canonical_parameter_hash(attack._original_snapshots[update_id], ["weight"]) == pre_hash
+    assert np.array_equal(sent[0], np.array([-6.0, 12.0], dtype=np.float32))
+
+
+def test_snapshot_and_cached_transform_do_not_alias_source_or_each_other():
+    """Storage diagnostics prove shallow-copy aliasing is not present."""
+    source = [np.array([1.0, 2.0], dtype=np.float32)]
+    attack = AuditedModelUpdateAttack(create_attack("sign_flipping", {"scale": -3.0}), ["weight"], round_provider=lambda: 0)
+    attack.record_update_created(source)
+    event = attack.events[0]
+
+    assert event["original_storage"][0]["owns_storage"] is True
+    assert event["original_storage"][0]["storage_address"] != event["transformed_storage"][0]["storage_address"]
+    assert not np.shares_memory(attack._original_snapshots[event["update_id"]][0], attack._cache[event["update_id"]][0])
+
+
+def test_recipient_metadata_is_not_part_of_canonical_hash():
+    """Transport envelopes never enter canonical parameter hashing."""
+    params = {"weight": np.array([1.0], dtype=np.float32)}
+    envelopes = [{"recipient": "node-0", "timestamp": 1}, {"recipient": "node-2", "timestamp": 999}]
+
+    assert canonical_parameter_hash(params) == canonical_parameter_hash(params)
+    assert envelopes[0] != envelopes[1]
+
+
+def test_already_attacked_payload_keeps_original_pre_attack_evidence():
+    """A retry's attacked bytes are recognized, never relabeled as original."""
+    original = [np.array([2.0], dtype=np.float32)]
+    attack = AuditedModelUpdateAttack(create_attack("sign_flipping", {"scale": -3.0}), ["weight"], round_provider=lambda: 0)
+    attack.record_update_created(original)
+    attacked = attack.manipulate_update(original)
+    attack.record_transmission("node-0")
+    attack.manipulate_update(attacked)
+    attack.record_transmission("node-2")
+
+    assert {item["pre_attack_sha256"] for item in attack.transmissions} == {attack.events[0]["pre_attack_sha256"]}
+    assert attack.events[0]["pre_attack_sha256"] != canonical_parameter_hash(attacked, ["weight"])
 
 
 def test_concurrent_transmission_keeps_its_own_hook_observation():
@@ -248,7 +301,7 @@ def test_eligible_transmission_that_bypasses_hook_fails_validation():
     attack.trace("local_training_completed")
     attack.record_transmission("node-0")
 
-    with pytest.raises(AssertionError, match="did not execute exactly once"):
+    with pytest.raises(AssertionError, match="inconsistent pre-attack hashes"):
         attack.validate_eligible_updates()
 
 
