@@ -46,17 +46,18 @@ class PoisonedLightningModel(LightningModel):
         self.model.node_addr = node_addr
 
     def get_parameters(self) -> list[np.ndarray]:
-        """Return parameters after applying the node's registered attack."""
-        params = super().get_parameters()
-        attack = get_attack(self.node_addr) if self.node_addr else None
-        return poison_model_update(params, attack)
+        """Return the current published model without transport-time mutation."""
+        return super().get_parameters()
 
-    def record_local_update(self) -> None:
-        """Register the newly trained, unmodified parameters with the audit."""
+    def publish_local_update(self) -> list[np.ndarray]:
+        """Create and install the one attacked snapshot produced by local training."""
+        benign = super().get_parameters()
         attack = get_attack(self.node_addr) if self.node_addr else None
-        recorder = getattr(attack, "record_update_created", None)
-        if recorder is not None:
-            recorder(super().get_parameters())
+        publisher = getattr(attack, "publish_update", None)
+        attacked = publisher(benign) if publisher is not None else poison_model_update(benign, attack)
+        detached = [np.asarray(value).copy() for value in attacked]
+        super().set_parameters(detached)
+        return [value.copy() for value in detached]
 
     def build_copy(self, **kwargs):
         """

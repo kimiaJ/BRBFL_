@@ -333,7 +333,7 @@ def mnist(
             attack_obj = create_attack(attack_name, attack_params)
             partitions[i] = prepare_dataset(partitions[i], attack_obj)
             if attack_name == "sign_flipping":
-                attack_obj = AuditedModelUpdateAttack(attack_obj, [name for name, _ in original_model.model.named_parameters()])
+                attack_obj = AuditedModelUpdateAttack(attack_obj, list(original_model.model.state_dict()))
                 model_update_audits[f"node-{i}"] = attack_obj
 
         partition_audits.append(
@@ -399,7 +399,7 @@ def mnist(
             for audit in model_update_audits.values():
                 audit.validate_eligible_updates()
         lifecycle_stage = (
-            "update_transmission_after_local_training_before_aggregation"
+            "local_update_publication_after_training_before_aggregation"
             if attack_name == "sign_flipping"
             else "dataset_preparation_after_partitioning_before_node_creation"
         )
@@ -417,11 +417,9 @@ def mnist(
                     node_id: {
                         "eligible_logical_updates": len(audit.eligible_update_ids()),
                         "logical_attack_applications": len(audit.events),
-                        "attack_hook_invocations": len(audit.hook_invocations),
+                        "attack_hook_invocations": 0,
                         "network_transmissions": len(audit.transmissions),
-                        "aggregation_observations": sum(
-                            event["event_type"] == "update_received_for_aggregation" for event in audit.event_trace
-                        ),
+                        "aggregation_observations": sum(event["event_type"] == "aggregation_observed" for event in audit.event_trace),
                     }
                     for node_id, audit in model_update_audits.items()
                 },

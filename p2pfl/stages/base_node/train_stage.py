@@ -74,16 +74,18 @@ class TrainStage(Stage):
             trace("local_training_started")
             learner.fit()
             logger.info(state.addr, "🎓 Training done.")
-            local_update_recorder = getattr(learner.get_model(), "record_local_update", None)
-            if local_update_recorder is not None:
-                local_update_recorder()
             trace("local_training_completed")
+            local_update_publisher = getattr(learner.get_model(), "publish_local_update", None)
+            if local_update_publisher is not None:
+                local_update_publisher()
 
             check_early_stop(state)
 
             # Aggregate Model
+            aggregation_observer = getattr(attack, "observe_aggregation", None)
+            if aggregation_observer is not None:
+                aggregation_observer(learner.get_model().get_parameters())
             models_added = aggregator.add_model(learner.get_model())
-            trace("update_received_for_aggregation", contributors=[state.addr])
 
             # send model added msg ---->> redundant (a node always owns its model)
             # TODO: print("Broadcast redundante")
@@ -184,7 +186,7 @@ class TrainStage(Stage):
             attack = get_attack(state.addr)
             recorder = getattr(attack, "record_transmission", None)
             if recorder is not None:
-                recorder(node)
+                recorder(node, model.get_parameters())
             return (
                 model_msg,
                 PartialModelCommand.get_name(),
