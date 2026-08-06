@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -14,12 +14,29 @@ def _array(value: Any) -> np.ndarray:
     return np.asarray(value).copy()
 
 
-def _hash(values: list[np.ndarray]) -> str:
+def canonical_parameter_hash(values: Mapping[str, Any] | Sequence[Any], names: Sequence[str] | None = None) -> str:
+    """Hash only canonical parameter content, independent of mapping/transport order."""
+    if isinstance(values, Mapping):
+        named_values = values.items()
+    else:
+        parameter_names = list(names) if names is not None else [str(index) for index in range(len(values))]
+        if len(parameter_names) != len(values):
+            raise ValueError("parameter names and values must have equal lengths")
+        named_values = zip(parameter_names, values, strict=True)
+
     digest = hashlib.sha256()
-    for value in values:
-        contiguous = np.ascontiguousarray(value)
-        digest.update(str(contiguous.dtype).encode())
-        digest.update(str(contiguous.shape).encode())
+    for name, value in sorted(named_values, key=lambda item: item[0]):
+        # np.asarray(torch_tensor.detach().cpu()) supplies exact detached CPU
+        # bytes for framework tensors while the copy isolates later mutation.
+        if hasattr(value, "detach"):
+            value = value.detach().cpu()
+        contiguous = np.ascontiguousarray(np.asarray(value).copy())
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(contiguous.dtype.str.encode("ascii"))
+        digest.update(b"\0")
+        digest.update(repr(contiguous.shape).encode("ascii"))
+        digest.update(b"\0")
         digest.update(contiguous.tobytes())
     return digest.hexdigest()
 
@@ -44,14 +61,14 @@ def transformation_evidence(before: list[Any], after: list[Any], names: list[str
         raise AssertionError("sign-flipping norm does not match the configured scale")
     if pre_norm and scale < 0 and not np.isclose(cosine, -1.0, rtol=tolerance, atol=tolerance):
         raise AssertionError("sign-flipping cosine similarity is not -1")
-    if _hash(original) == _hash(transformed):
+    if canonical_parameter_hash(original, names) == canonical_parameter_hash(transformed, names):
         raise AssertionError("sign-flipping pre/post hashes must differ")
     return {
         "formula": "attacked = scale * original",
         "scale": scale,
         "numerical_tolerance": tolerance,
-        "pre_attack_sha256": _hash(original),
-        "post_attack_sha256": _hash(transformed),
+        "pre_attack_sha256": canonical_parameter_hash(original, names),
+        "post_attack_sha256": canonical_parameter_hash(transformed, names),
         "pre_attack_l2_norm": pre_norm,
         "post_attack_l2_norm": post_norm,
         "cosine_similarity": cosine,
@@ -84,6 +101,7 @@ class AuditedModelUpdateAttack:
         self.tolerance = tolerance
         self._round_provider = round_provider
         self._cache: dict[str, list[np.ndarray]] = {}
+        self._original_snapshots: dict[str, list[np.ndarray]] = {}
         self._eligible: dict[str, dict[str, Any]] = {}
         # An attacked payload is only a retry within the round that produced it.
         # Scoping this index by round prevents a later locally trained update
@@ -95,7 +113,9 @@ class AuditedModelUpdateAttack:
         self.transmissions: list[dict[str, Any]] = []
         self.event_trace: list[dict[str, Any]] = []
         self.node_id: str | None = None
-        self._last_hook_observation: dict[str, Any] | None = None
+        self._thread_state = threading.local()
+        self._hook_sequence = 0
+        self._transmission_sequence = 0
 
     def trace(self, event_type: str, **fields: Any) -> None:
         """Append one compact lifecycle record without producing console noise."""
@@ -122,27 +142,36 @@ class AuditedModelUpdateAttack:
     def manipulate_update(self, parameters: list[Any]) -> list[Any]:
         """Transform one copied update and prove the caller's input was not mutated."""
         original = [_array(value) for value in parameters]
-        original_hash = _hash(original)
+        original_hash = canonical_parameter_hash(original, self.parameter_names)
         round_id = self._round_id()
         update_id = self._update_id(round_id, original_hash)
         with self._lock:
             logically_applied = False
+            reused = False
+            self._hook_sequence += 1
+            hook_invocation_id = f"{self.node_id or 'unassigned'}:hook-{self._hook_sequence}"
             self.trace("sign_flipping_hook_entered", update_id=update_id, pre_attack_sha256=original_hash)
             # Defensive handling for a caller that passes our output back through
             # the hook.  It is a transmission, never a new mathematical attack.
             previously_attacked_id = self._post_hash_to_update_id.get((round_id, original_hash))
             if previously_attacked_id is not None:
                 update_id = previously_attacked_id
-                transformed = original
+                transformed = [value.copy() for value in self._cache[update_id]]
+                reused = True
             elif update_id in self._cache:
                 transformed = [value.copy() for value in self._cache[update_id]]
+                reused = True
             elif update_id in self._eligible:
-                transformed = self.attack.manipulate_update([value.copy() for value in original])
+                snapshot = self._original_snapshots[update_id]
+                transformed = self.attack.manipulate_update([value.copy() for value in snapshot])
                 logically_applied = True
                 evidence = transformation_evidence(
-                    original, transformed, self.parameter_names, float(self.attack.params["scale"]), self.tolerance
+                    snapshot, transformed, self.parameter_names, float(self.attack.params["scale"]), self.tolerance
                 )
-                if _hash(original) != original_hash or _hash([_array(value) for value in parameters]) != original_hash:
+                if (
+                    canonical_parameter_hash(snapshot, self.parameter_names) != original_hash
+                    or canonical_parameter_hash(parameters, self.parameter_names) != original_hash
+                ):
                     raise AssertionError("evidence capture or attack mutated the original update")
                 evidence.update(
                     {
@@ -150,6 +179,7 @@ class AuditedModelUpdateAttack:
                         "round_id": round_id,
                         "update_id": update_id,
                         "logical_application_count": 1,
+                        "logical_application_id": f"{update_id}:application-1",
                     }
                 )
                 self.events.append(evidence)
@@ -162,9 +192,9 @@ class AuditedModelUpdateAttack:
                 # locally trained updates and must not be scaled as a whole.
                 transformed = original
 
-            post_hash = _hash([_array(value) for value in transformed])
+            post_hash = canonical_parameter_hash(transformed, self.parameter_names)
             expected = self._cache.get(update_id)
-            if expected is not None and post_hash != _hash(expected):
+            if expected is not None and post_hash != canonical_parameter_hash(expected, self.parameter_names):
                 raise AssertionError("transmitted copies of an attacked update have different hashes")
             observation = {
                 "round_id": round_id,
@@ -172,9 +202,12 @@ class AuditedModelUpdateAttack:
                 "pre_attack_sha256": self._eligible.get(update_id, {}).get("pre_attack_sha256"),
                 "post_attack_sha256": post_hash,
                 "transformed": logically_applied,
+                "cached_result_reused": reused,
+                "logical_application_id": (f"{update_id}:application-1" if expected is not None else None),
+                "hook_invocation_id": hook_invocation_id,
             }
             self.hook_invocations.append(observation)
-            self._last_hook_observation = observation
+            self._thread_state.last_hook_observation = observation
             self.trace(
                 "sign_flipping_hook_observed",
                 update_id=observation["update_id"],
@@ -187,7 +220,7 @@ class AuditedModelUpdateAttack:
     def record_update_created(self, parameters: list[Any]) -> None:
         """Register one locally trained update as eligible before serialization."""
         original = [_array(value) for value in parameters]
-        original_hash = _hash(original)
+        original_hash = canonical_parameter_hash(original, self.parameter_names)
         update_id = self._update_id(self._round_id(), original_hash)
         self._eligible.setdefault(
             update_id,
@@ -198,6 +231,7 @@ class AuditedModelUpdateAttack:
                 "pre_attack_sha256": original_hash,
             },
         )
+        self._original_snapshots.setdefault(update_id, [value.copy() for value in original])
         self.trace(
             "local_update_created",
             update_id=update_id,
@@ -206,10 +240,17 @@ class AuditedModelUpdateAttack:
 
     def record_transmission(self, recipient: str) -> None:
         """Associate a completed gossip serialization with its recipient."""
-        observation = self._last_hook_observation
+        observation = getattr(self._thread_state, "last_hook_observation", None)
         if observation is not None and observation["round_id"] == self._round_id():
             transmission_count = sum(item["round_id"] == self._round_id() for item in self.transmissions) + 1
-            item = {**observation, "recipient": recipient, "transmission_count": transmission_count}
+            self._transmission_sequence += 1
+            item = {
+                **observation,
+                "producer": self.node_id,
+                "recipient": recipient,
+                "transmission_sequence": self._transmission_sequence,
+                "transmission_count": transmission_count,
+            }
             self.transmissions.append(item)
             self.trace(
                 "update_transmitted",
@@ -254,10 +295,18 @@ class AuditedModelUpdateAttack:
         if invalid:
             raise AssertionError(f"eligible sign-flipping updates did not execute exactly once: {invalid}")
         for update_id in eligible:
-            expected_hash = next(event["post_attack_sha256"] for event in self.events if event["update_id"] == update_id)
-            transmitted_hashes = {item["post_attack_sha256"] for item in self.transmissions if item["update_id"] == update_id}
+            event = next(event for event in self.events if event["update_id"] == update_id)
+            expected_hash = event["post_attack_sha256"]
+            copies = [item for item in self.transmissions if item["update_id"] == update_id]
+            transmitted_pre_hashes = {item["pre_attack_sha256"] for item in copies}
+            if transmitted_pre_hashes != {event["pre_attack_sha256"]}:
+                raise AssertionError(f"transmitted copies of eligible update {update_id} have inconsistent pre-attack hashes")
+            transmitted_hashes = {item["post_attack_sha256"] for item in copies}
             if transmitted_hashes != {expected_hash}:
                 raise AssertionError(f"transmitted copies of eligible update {update_id} have inconsistent post-attack hashes")
+            application_id = event["logical_application_id"]
+            if any(item["logical_application_id"] != application_id for item in copies):
+                raise AssertionError(f"hook invocations for eligible update {update_id} refer to different applications")
         return {update_id: counts[update_id] for update_id in eligible}
 
     def _update_id(self, round_id: str, pre_attack_hash: str) -> str:
