@@ -320,6 +320,7 @@ def mnist(
     clear_attacks()
     partition_audits = []
     model_update_audits = {}
+    evaluation_attack = create_attack("backdoor", attack_params) if "target_class" in attack_params else None
     for i in range(n):
         if config.protocol == "memory":
             address = f"node-{i}"
@@ -329,6 +330,8 @@ def mnist(
             address = "127.0.0.1"
         attack_obj = None
         original_model = model_fn()
+        if evaluation_attack is not None:
+            original_model.model.backdoor_evaluation_attack = evaluation_attack
         if i in adversary_indices and attack_name != "none":
             attack_obj = create_attack(attack_name, attack_params)
             partitions[i] = prepare_dataset(partitions[i], attack_obj)
@@ -336,15 +339,16 @@ def mnist(
                 attack_obj = AuditedModelUpdateAttack(attack_obj, list(original_model.model.state_dict()))
                 model_update_audits[f"node-{i}"] = attack_obj
 
-        partition_audits.append(
-            audit_partition(
-                i,
-                original_labels[i],
-                labels(partitions[i]),
-                attack_params.get("flip_map", {}),
-                attack_obj is not None and attack_name == "label_flipping",
-            )
+        partition_audit = audit_partition(
+            i,
+            original_labels[i],
+            labels(partitions[i]),
+            attack_params.get("flip_map", {}),
+            attack_obj is not None and attack_name == "label_flipping",
         )
+        if attack_name == "backdoor" and attack_obj is not None:
+            partition_audit = {"node_id": f"node-{i}", "malicious": True, **attack_obj.poisoning_evidence}
+        partition_audits.append(partition_audit)
 
         model_to_use = PoisonedLightningModel(original_model.model, node_addr=address)
         node = Node(
@@ -394,6 +398,11 @@ def mnist(
                     metric_rows.extend(
                         {"node_id": node_id, "metric": metric, "round": round_number, "value": value} for round_number, value in values
                     )
+
+        def round_metric(round_number: int, metric_name: str, default: float = 0.0) -> float:
+            values = [float(row["value"]) for row in metric_rows if row["round"] == round_number and row["metric"] == metric_name]
+            return sum(values) / len(values) if values else default
+
         participating = [f"node-{i}" for i in range(n)]
         if attack_name == "sign_flipping":
             for audit in model_update_audits.values():
@@ -406,11 +415,55 @@ def mnist(
         write_evidence(
             config.output_dir,
             {
+                "configuration": config.to_dict()
+                if hasattr(config, "to_dict")
+                else {
+                    "nodes": n,
+                    "rounds": r,
+                    "epochs": e,
+                    "seed": config.seed,
+                    "topology": config.topology.value,
+                    "attack": attack_name,
+                },
+                "seeds": {"experiment": config.seed, "partition": config.seed, "poisoning": attack_params.get("seed", config.seed)},
                 "lifecycle_stage": lifecycle_stage,
                 "malicious_node_ids": [f"node-{i}" for i in adversary_indices],
                 "source_target_labels": {str(key): value for key, value in attack_params.get("flip_map", {}).items()},
                 "original_dataset_unchanged": labels(data) == source_labels_before,
                 "partitions": partition_audits,
+                "per_node_poisoning_evidence": [
+                    (
+                        {
+                            "node_id": row["node_id"],
+                            **(
+                                {key: value for key, value in row.items() if key not in {"node_id", "malicious"}}
+                                if row.get("malicious") and attack_name == "backdoor"
+                                else {
+                                    "samples_examined": 0,
+                                    "samples_poisoned": 0,
+                                    "changed_image_indices": [],
+                                    "changed_label_indices": [],
+                                    "source_partition_unchanged": True,
+                                    "attack_application_count": 0,
+                                }
+                            ),
+                        }
+                    )
+                    for row in partition_audits
+                ],
+                "target_label": attack_params.get("target_class") if "target_class" in attack_params else None,
+                "trigger": (
+                    {
+                        "pattern": "solid_square",
+                        "location": "bottom_right",
+                        "size": attack_params.get("trigger_size", 3),
+                        "value": attack_params.get("trigger_value", 1.0),
+                        "coordinates": evaluation_attack.trigger.coordinates() if evaluation_attack else [],
+                    }
+                    if evaluation_attack
+                    else None
+                ),
+                "poison_fraction": attack_params.get("poison_rate", 0.0) if attack_name == "backdoor" else 0.0,
                 "configured_rounds": r,
                 "model_update_event_trace": {node_id: audit.event_trace for node_id, audit in model_update_audits.items()},
                 "model_update_counters": {
@@ -426,6 +479,11 @@ def mnist(
                 "rounds": [
                     {
                         "round": round_number,
+                        "clean_test_loss": round_metric(round_number, "test_loss"),
+                        "clean_test_accuracy": round_metric(round_number, "test_metric"),
+                        "triggered_test_asr": round_metric(round_number, "triggered_test_asr"),
+                        "triggered_test_target_prediction_count": int(round_metric(round_number, "triggered_test_target_prediction_count")),
+                        "eligible_triggered_examples": int(round_metric(round_number, "eligible_triggered_examples")),
                         "participating_node_ids": [
                             node_id
                             for node_id in participating

@@ -24,7 +24,7 @@ from torchmetrics import Accuracy, Metric
 
 from brbfl.attacks import get_attack, poison_training_batch
 from brbfl.attacks.poisoned_model import PoisonedLightningModel
-from brbfl.evaluation.metrics import backdoor_evaluation_configured
+from brbfl.evaluation.metrics import apply_mnist_trigger, backdoor_evaluation_configured, triggered_asr_counts
 from p2pfl.learning.frameworks.pytorch.lightning_model import LightningModel
 from p2pfl.settings import Settings
 from p2pfl.utils.seed import set_seed
@@ -129,19 +129,18 @@ class MLP(L.LightningModule):
         pred = logits.argmax(dim=1)
         acc = (pred == y).float().mean()
 
-        attack = get_attack(getattr(self, "node_addr", None))
+        attack = get_attack(getattr(self, "node_addr", None)) or getattr(self, "backdoor_evaluation_attack", None)
         self.log("test_loss", loss)
         self.log("test_metric", acc)
-        # ASR is meaningful only when a trigger attack supplies its evaluation
-        # semantics.  Previously this was an unconditional target-class rate.
+        # Never call predictions on unmodified images ASR. Genuine ASR is
+        # measured only after triggering non-target examples.
         if backdoor_evaluation_configured(attack):
-            x_trigger = x.clone()
-            if x.dim() == 4:
-                x_trigger[:, :, -attack.trigger_size :, -attack.trigger_size :] = attack.trigger_value
-            elif x.dim() == 3:
-                x_trigger[:, -attack.trigger_size :, -attack.trigger_size :] = attack.trigger_value
+            x_trigger = apply_mnist_trigger(x, attack.trigger)
             pred_trigger = self(x_trigger).argmax(dim=1)
-            self.log("backdoor_asr", (pred_trigger == attack.target_class).float().mean())
+            result = triggered_asr_counts(pred_trigger, y, attack.target_class, attack.source_labels)
+            self.log("triggered_test_asr", result["triggered_test_asr"], batch_size=result["eligible_triggered_examples"])
+            self.log("triggered_test_target_prediction_count", float(result["triggered_test_target_prediction_count"]), reduce_fx="sum")
+            self.log("eligible_triggered_examples", float(result["eligible_triggered_examples"]), reduce_fx="sum")
 
         return loss
 

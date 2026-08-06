@@ -10,24 +10,29 @@ AttackFactory = Callable[[Mapping[str, Any]], Attack]
 
 def _label(p):
     from .label_flipping import LabelFlippingAttack
+
     return LabelFlippingAttack(flip_map=dict(p.get("flip_map", {})))
 
 
 def _sign(p):
     from .sign_flipping import SignFlippingAttack
+
     return SignFlippingAttack(scale=float(p.get("scale", -3.0)))
 
 
 def _scale(p):
     from .scale import ScaleAttack
+
     return ScaleAttack(factor=float(p.get("scale_factor", 3.0)), apply_on=p.get("scale_on", "delta"))
 
 
 def _construct(module: str, class_name: str, **defaults):
     def factory(parameters):
         from importlib import import_module
+
         cls = getattr(import_module(f"brbfl.attacks.{module}"), class_name)
-        return cls(**defaults)
+        return cls(**(defaults | dict(parameters)))
+
     return factory
 
 
