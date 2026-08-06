@@ -89,6 +89,26 @@ class AuditedModelUpdateAttack:
         self._lock = threading.Lock()
         self.events: list[dict[str, Any]] = []
         self.transmissions: list[dict[str, Any]] = []
+        self.event_trace: list[dict[str, Any]] = []
+        self.node_id: str | None = None
+
+    def trace(self, event_type: str, **fields: Any) -> None:
+        """Append one compact lifecycle record without producing console noise."""
+        latest = next((event for event in reversed(self.events) if event["round_id"] == self._round_id()), None)
+        transmissions = sum(item["round_id"] == self._round_id() for item in self.transmissions)
+        self.event_trace.append(
+            {
+                "node_id": self.node_id,
+                "framework_round": self._round_id(),
+                "event_type": event_type,
+                "update_id": fields.pop("update_id", latest["update_id"] if latest else None),
+                "pre_attack_sha256": fields.pop("pre_attack_sha256", latest["pre_attack_sha256"] if latest else None),
+                "post_attack_sha256": fields.pop("post_attack_sha256", latest["post_attack_sha256"] if latest else None),
+                "recipients": fields.pop("recipients", []),
+                "transmission_count": fields.pop("transmission_count", transmissions),
+                **fields,
+            }
+        )
 
     def _round_id(self) -> str:
         value = self._round_provider() if self._round_provider is not None else None
@@ -101,6 +121,7 @@ class AuditedModelUpdateAttack:
         round_id = self._round_id()
         update_id = f"round-{round_id}:{original_hash}"
         with self._lock:
+            self.trace("sign_flipping_hook_entered", update_id=update_id, pre_attack_sha256=original_hash)
             # Defensive handling for a caller that passes our output back through
             # the hook.  It is a transmission, never a new mathematical attack.
             previously_attacked_id = self._post_hash_to_update_id.get((round_id, original_hash))
@@ -127,6 +148,7 @@ class AuditedModelUpdateAttack:
                 self.events.append(evidence)
                 self._cache[update_id] = [_array(value) for value in transformed]
                 self._post_hash_to_update_id[(round_id, evidence["post_attack_sha256"])] = update_id
+                self.trace("sign_flipping_logically_applied", **evidence)
 
             post_hash = _hash([_array(value) for value in transformed])
             expected_hash = _hash(self._cache[update_id])
@@ -143,6 +165,55 @@ class AuditedModelUpdateAttack:
             )
             return [_array(value) for value in transformed]
 
+    def record_update_created(self, parameters: list[Any]) -> None:
+        """Record the stable identity before the serialization hook runs."""
+        original = [_array(value) for value in parameters]
+        original_hash = _hash(original)
+        self.trace(
+            "local_update_created",
+            update_id=f"round-{self._round_id()}:{original_hash}",
+            pre_attack_sha256=original_hash,
+        )
+
+    def record_transmission(self, recipient: str) -> None:
+        """Associate a completed gossip serialization with its recipient."""
+        matching = [item for item in self.transmissions if item["round_id"] == self._round_id()]
+        if matching:
+            item = matching[-1]
+            item.setdefault("recipients", []).append(recipient)
+            self.trace(
+                "update_transmitted",
+                update_id=item["update_id"],
+                post_attack_sha256=item["post_attack_sha256"],
+                recipients=[recipient],
+                transmission_count=len(matching),
+            )
+        else:
+            # This is deliberately retained: it makes an eligible serialized
+            # local update that bypassed the hook visible to the validator.
+            self.trace("update_transmitted", recipients=[recipient])
+
+    def eligible_round_ids(self) -> set[str]:
+        """Return rounds with local training and an attempted outbound update."""
+        trained = {item["framework_round"] for item in self.event_trace if item["event_type"] == "local_training_completed"}
+        transmitted = {item["framework_round"] for item in self.event_trace if item["event_type"] == "update_transmitted"}
+        return trained & transmitted
+
+    def validate_eligible_updates(self) -> dict[str, int]:
+        """Require one attack for every observed eligible local update."""
+        eligible = self.eligible_round_ids()
+        observed = {event["round_id"] for event in self.events}
+        counts = {round_id: sum(event["round_id"] == round_id for event in self.events) for round_id in eligible | observed}
+        invalid = {round_id: count for round_id, count in counts.items() if count != (1 if round_id in eligible else 0)}
+        if invalid:
+            raise AssertionError(f"eligible sign-flipping updates did not execute exactly once: {invalid}")
+        return {round_id: counts[round_id] for round_id in eligible}
+
+    def participated_in_round(self, round_id: Any) -> bool:
+        """Return the participant selection recorded for a framework round."""
+        matches = [item for item in self.event_trace if item["event_type"] == "round_entered" and item["framework_round"] == str(round_id)]
+        return bool(matches and matches[-1]["participating"])
+
     def evidence_for_round(self, round_id: Any) -> dict[str, Any]:
         """Return one logical update and its separate transmission count."""
         normalized_round = str(round_id)
@@ -157,5 +228,6 @@ class AuditedModelUpdateAttack:
     def on_attach(self, node: Any) -> None:
         """Forward node attachment to the preserved implementation."""
         self.attack.on_attach(node)
+        self.node_id = node.addr
         if self._round_provider is None:
             self._round_provider = lambda: node.state.round

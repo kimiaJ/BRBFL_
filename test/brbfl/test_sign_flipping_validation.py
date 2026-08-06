@@ -105,6 +105,37 @@ def test_prior_round_attacked_bytes_are_a_new_update_in_the_next_round():
     assert np.array_equal(second[0], np.array([18.0], dtype=np.float32))
 
 
+def test_terminal_round_without_outbound_update_is_not_eligible():
+    """A configured terminal lifecycle event does not fabricate an attack."""
+    attack = AuditedModelUpdateAttack(create_attack("sign_flipping", {"scale": -3.0}), ["weight"], round_provider=lambda: 1)
+    attack.trace("round_entered", participating=True)
+    attack.trace("local_training_completed")
+    attack.trace("evaluation_completed")
+
+    assert attack.eligible_round_ids() == set()
+    assert attack.validate_eligible_updates() == {}
+    assert attack.events == []
+
+
+def test_participant_absence_is_not_an_eligible_update():
+    """A malicious node omitted by voting has no expected transformation."""
+    attack = AuditedModelUpdateAttack(create_attack("sign_flipping", {"scale": -3.0}), ["weight"], round_provider=lambda: 1)
+    attack.trace("round_entered", participating=False)
+
+    assert attack.eligible_round_ids() == set()
+    assert attack.validate_eligible_updates() == {}
+
+
+def test_eligible_transmission_that_bypasses_hook_fails_validation():
+    """Observed training plus serialization cannot silently evade the attack."""
+    attack = AuditedModelUpdateAttack(create_attack("sign_flipping", {"scale": -3.0}), ["weight"], round_provider=lambda: 1)
+    attack.trace("local_training_completed")
+    attack.record_transmission("node-0")
+
+    with pytest.raises(AssertionError, match="did not execute exactly once"):
+        attack.validate_eligible_updates()
+
+
 def test_sign_flipping_configs_match_controls():
     """The attack and isolated output directory are the only treatments."""
     clean = load_experiment_config("configs/smoke/mnist_sign_flipping_clean.yaml")

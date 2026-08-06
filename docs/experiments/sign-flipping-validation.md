@@ -44,7 +44,24 @@ malicious event records parameter names and shapes, pre/post hashes, L2 norms,
 cosine similarity, scale, tolerance, maximum formula error, and three compact
 sampled values per tensor. No parameter archive is stored. The comparison
 utility rejects a clean attack, a benign-node transformation, mismatched
-participants, a count other than once per node-1 round, or equal final hashes.
+participants, an eligible node-1 update that bypasses the hook, or equal final
+hashes. Eligibility is observed rather than inferred from the configured
+round count: the node must complete local training and attempt to serialize an
+outbound update in that framework round. A terminal round with evaluation but
+no outbound update and a round in which node-1 was not selected are therefore
+not fabricated as attack applications.
+
+The lifecycle trace also documents a P2PFL detail that caused the previous
+round-1 failure. FedAvg replaces the learner model after round 0 by calling
+`build_copy()`. The poisoned wrapper previously lost its `node_addr` registry
+key in that copy, so round 1 trained a distinct local model but its parameter
+serialization could no longer find the attack hook (case A, not terminal-round
+behavior or deduplication). The wrapper now carries that key into each
+aggregated replacement. Framework training rounds are zero-based; P2PFL
+increments the state after gossip and performs terminal evaluation at the
+incremented value. Thus `rounds: 2` normally trains rounds 0 and 1 and may also
+produce an evaluation event at framework value 2; these are separate from
+logical attack applications and per-recipient network transmissions.
 
 ## Interpretation and limitation
 

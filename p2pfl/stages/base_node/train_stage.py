@@ -19,6 +19,7 @@
 
 from typing import Any
 
+from brbfl.attacks import get_attack
 from p2pfl.communication.commands.message.metrics_command import MetricsCommand
 from p2pfl.communication.commands.message.models_agregated_command import ModelsAggregatedCommand
 from p2pfl.communication.commands.message.models_ready_command import ModelsReadyCommand
@@ -53,6 +54,8 @@ class TrainStage(Stage):
             raise Exception("Invalid parameters on TrainStage.")
 
         try:
+            attack = get_attack(state.addr)
+            trace = getattr(attack, "trace", lambda *args, **fields: None)
             check_early_stop(state)
 
             # Set Models To Aggregate
@@ -62,18 +65,22 @@ class TrainStage(Stage):
 
             # Evaluate and send metrics
             TrainStage.__evaluate(state, learner, communication_protocol)
+            trace("evaluation_completed")
 
             check_early_stop(state)
 
             # Train
             logger.info(state.addr, "🏋️‍♀️ Training...")
+            trace("local_training_started")
             learner.fit()
             logger.info(state.addr, "🎓 Training done.")
+            trace("local_training_completed")
 
             check_early_stop(state)
 
             # Aggregate Model
             models_added = aggregator.add_model(learner.get_model())
+            trace("update_received_for_aggregation", contributors=[state.addr])
 
             # send model added msg ---->> redundant (a node always owns its model)
             # TODO: print("Broadcast redundante")
@@ -171,6 +178,10 @@ class TrainStage(Stage):
                 model.get_contributors(),
                 model.get_num_samples(),
             )
+            attack = get_attack(state.addr)
+            recorder = getattr(attack, "record_transmission", None)
+            if recorder is not None:
+                recorder(node)
             return (
                 model_msg,
                 PartialModelCommand.get_name(),

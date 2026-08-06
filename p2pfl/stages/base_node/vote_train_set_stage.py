@@ -21,6 +21,7 @@ import math
 import random
 import time
 
+from brbfl.attacks import get_attack
 from p2pfl.communication.commands.message.vote_train_set_command import VoteTrainSetCommand
 from p2pfl.communication.protocols.communication_protocol import CommunicationProtocol
 from p2pfl.management.logger import logger
@@ -60,6 +61,10 @@ class VoteTrainSetStage(Stage):
                 state,
                 communication_protocol,
             )
+            attack = get_attack(state.addr)
+            trace = getattr(attack, "trace", None)
+            if trace is not None:
+                trace("round_entered", participating=state.addr in state.train_set)
             logger.info(
                 state.addr,
                 f"🚂 Train set of {len(state.train_set)} nodes: {state.train_set}",
