@@ -1,6 +1,6 @@
 # Clean smoke reproducibility comparison
 
-Configuration: `configs/smoke/mnist_clean.yaml`; seed: `666`.
+Configuration: `configs\smoke\mnist_clean.yaml`; seed: `666`.
 
 | Output | Classification | Exact | Maximum absolute difference |
 |---|---|---:|---:|

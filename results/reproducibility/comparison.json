@@ -28,12 +28,12 @@
       "exact": true
     }
   },
-  "config_path": "configs/smoke/mnist_clean.yaml",
+  "config_path": "configs\\smoke\\mnist_clean.yaml",
   "configuration_identical": true,
   "environment": {
     "numpy": "1.26.4",
-    "platform": "Linux-6.12.13-x86_64-with-glibc2.39",
-    "python": "3.12.13"
+    "platform": "Windows-10-10.0.19045-SP0",
+    "python": "3.11.9"
   },
   "numerical_tolerance": {
     "absolute": 1e-12,

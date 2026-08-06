@@ -25,7 +25,7 @@
     "show_metrics": false,
     "topology": "full"
   },
-  "final_parameters_sha256": "074df04019764a4904c8d78433f9812f286fa5ed311bdb7e01c088b53a127b07",
+  "final_parameters_sha256": "2334566babaaff672b310079f83485b50deddb334563708803c4913b2b14d7c2",
   "initial_parameters_sha256": "86799c85bde7b5fdaae485a0ddbc66b2870ec72019c07d782edeb9ab568e9aab",
   "participating_nodes": [
     {
@@ -299,7 +299,7 @@
   "round_metrics": [
     {
       "accuracy": 0.24166666666666667,
-      "loss": 2.161180815557979,
+      "loss": 2.1611808155579793,
       "round": 0
     },
     {
