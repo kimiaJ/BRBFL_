@@ -24,10 +24,10 @@ from p2pfl.management.logger import logger
 from torchmetrics import Accuracy, Metric
 
 from p2pfl.learning.frameworks.pytorch.lightning_model import LightningModel
-from p2pfl.examples.mnist.attacks.poisoned_model import PoisonedLightningModel
+from brbfl.attacks.poisoned_model import PoisonedLightningModel
 from p2pfl.settings import Settings
 from p2pfl.utils.seed import set_seed
-from p2pfl.examples.mnist.attacks.registry import get_attack
+from brbfl.attacks import get_attack, poison_training_batch
 ####
 # Example MLP
 ####
@@ -101,8 +101,7 @@ class MLP(L.LightningModule):
         y = batch["label"]
 
         attack = get_attack(getattr(self, "node_addr", None))
-        if attack and hasattr(attack, "poison_batch"):
-            x, y = attack.poison_batch((x, y))
+        x, y = poison_training_batch((x, y), attack)
             
 
         logits = self(x)

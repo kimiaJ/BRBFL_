@@ -1,15 +1,18 @@
-from typing import Any, Dict, Optional
-from p2pfl.node import Node
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
 from p2pfl.learning.dataset.p2pfl_dataset import P2PFLDataset
+
+if TYPE_CHECKING:
+    from p2pfl.node import Node
 
 
 class BaseAttack:
 
     def __init__(self, params: Dict[str, Any] = None):
         self.params = params or {}
-        self.node: Optional[Node] = None
+        self.node: Optional["Node"] = None
 
-    def on_attach(self, node: Node) -> None:
+    def on_attach(self, node: "Node") -> None:
         """Called when attack is attached to a node."""
         self.node = node
 

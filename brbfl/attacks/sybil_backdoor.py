@@ -1,5 +1,5 @@
 # attacks/sybil_backdoor.py
-from p2pfl.examples.mnist.attacks.backdoor import BackdoorAttack
+from brbfl.attacks.backdoor import BackdoorAttack
 from typing import List
 import numpy as np
 
