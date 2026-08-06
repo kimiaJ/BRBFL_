@@ -22,39 +22,35 @@
 # snakeviz _MainThread-0.pstat
 # gprof2dot -f pstats Gossiper-10.pstat | dot -Tpng -o output.png && open output.png
 
-import re
-import os
-from dataclasses import replace
-from datetime import datetime, timezone
-import torch
-import pandas as pd
-import matplotlib.pyplot as plt
 import argparse
+import os
+import re
 import time
 import uuid
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
-
+import matplotlib.pyplot as plt
+import pandas as pd
 
 from brbfl.attacks import clear_attacks, create_attack, prepare_dataset, register_attack
 from brbfl.attacks.poisoned_model import PoisonedLightningModel
-
+from brbfl.experiments.attack_evidence import audit_partition, labels, parameter_hash, write_evidence
+from brbfl.experiments.config import AttackConfig, DatasetConfig, ExperimentConfig, load_experiment_config
+from brbfl.experiments.config import TopologyType as ConfigTopologyType
+from brbfl.experiments.datasets import partition_dataset
+from brbfl.experiments.manifest import write_manifest
+from brbfl.experiments.reproducibility import seed_everything
 from p2pfl.communication.protocols.protobuff.grpc import GrpcCommunicationProtocol
 from p2pfl.communication.protocols.protobuff.memory import MemoryCommunicationProtocol
-
 from p2pfl.learning.aggregators.scaffold import Scaffold
 from p2pfl.learning.dataset.p2pfl_dataset import P2PFLDataset
-from p2pfl.learning.dataset.partition_strategies import RandomIIDPartitionStrategy
 from p2pfl.management.logger import logger
 from p2pfl.node import Node
 from p2pfl.settings import Settings
 from p2pfl.utils.topologies import TopologyFactory, TopologyType
 from p2pfl.utils.utils import set_standalone_settings, wait_to_finish
-from brbfl.experiments.config import AttackConfig, DatasetConfig, ExperimentConfig, TopologyType as ConfigTopologyType, load_experiment_config
-from brbfl.experiments.datasets import partition_dataset
-from brbfl.experiments.manifest import write_manifest
-from brbfl.experiments.reproducibility import seed_everything
-
 
 
 def __parse_args() -> argparse.Namespace:
@@ -73,11 +69,33 @@ def __parse_args() -> argparse.Namespace:
     parser.add_argument("--use_scaffold", action="store_true", help="Use the Scaffold aggregator.", default=False)
     parser.add_argument("--seed", type=int, help="The seed to use.", default=666)
     parser.add_argument("--batch_size", type=int, help="The batch size for training.", default=128)
-    parser.add_argument("--attack", type=str, choices=["none", "label_flipping", "sign_flipping" , "scale", "backdoor", "model_replacement","sybil_backdoor","free_rider","delay_drop","colluding_backdoor"], default="colluding_backdoor")
+    parser.add_argument(
+        "--attack",
+        type=str,
+        choices=[
+            "none",
+            "label_flipping",
+            "sign_flipping",
+            "scale",
+            "backdoor",
+            "model_replacement",
+            "sybil_backdoor",
+            "free_rider",
+            "delay_drop",
+            "colluding_backdoor",
+        ],
+        default="colluding_backdoor",
+    )
     parser.add_argument("--adversaries", type=str, default="0,1,2,3,4", help="Comma-separated node indices to be adversaries")
     parser.add_argument("--flip_pairs", type=str, default="0-1,2-3,4-5,6-7,8-9", help="Label pairs to flip (e.g., 0-1)")
-    parser.add_argument( "--scale_factor", type=float, default=3.0, help="Boost factor for scale attack")
-    parser.add_argument("--scale_on",type=str,choices=["delta", "state"],default="delta",help="Scale the delta or the whole state",)
+    parser.add_argument("--scale_factor", type=float, default=3.0, help="Boost factor for scale attack")
+    parser.add_argument(
+        "--scale_on",
+        type=str,
+        choices=["delta", "state"],
+        default="delta",
+        help="Scale the delta or the whole state",
+    )
     parser.add_argument("--save_csv", action="store_true", help="Save results to CSV files.", default=True)
     parser.add_argument("--output_dir", type=str, help="Directory to save CSV results.", default="results/mnist")
     parser.add_argument("--config", type=str, help="Path to a YAML experiment configuration.", default=None)
@@ -104,8 +122,6 @@ def __parse_args() -> argparse.Namespace:
     args.topology = TopologyType(args.topology)
 
     return args
-
-
 
 
 def save_experiment_results(output_dir: Path, start_time: float | None = None) -> None:
@@ -184,6 +200,7 @@ def save_experiment_results(output_dir: Path, start_time: float | None = None) -
             print(f"Saved execution time to: {time_csv_path}")
         except Exception as e:
             print(f"Error saving execution time: {e}")
+
 
 def _config_from_legacy_args(
     n: int,
@@ -281,28 +298,42 @@ def mnist(
 
     if config.framework == "tensorflow":
         from p2pfl.examples.mnist.model.mlp_tensorflow import model_build_fn  # type: ignore
+
         model_fn = model_build_fn  # type: ignore
     elif config.framework == "pytorch":
         from p2pfl.examples.mnist.model.mlp_pytorch import model_build_fn  # type: ignore
+
         model_fn = model_build_fn  # type: ignore
     else:
         raise ValueError(f"Framework {config.framework} not added on this example.")
 
     data = P2PFLDataset.from_huggingface(config.dataset.name)
+    source_labels_before = labels(data)
     partitions = partition_dataset(data, config)
+    original_labels = [labels(partition) for partition in partitions[:n]]
 
     nodes = []
     adversary_indices = list(config.attack.adversaries)
     attack_name = config.attack.name
     attack_params = config.attack.parameters
     clear_attacks()
+    partition_audits = []
     for i in range(n):
-        address = f"node-{i}" if config.protocol == "memory" else f"unix:///tmp/p2pfl-{i}.sock" if config.protocol == "unix" else "127.0.0.1"
+        if config.protocol == "memory":
+            address = f"node-{i}"
+        elif config.protocol == "unix":
+            address = f"unix:///tmp/p2pfl-{i}.sock"
+        else:
+            address = "127.0.0.1"
         attack_obj = None
         original_model = model_fn()
         if i in adversary_indices and attack_name != "none":
             attack_obj = create_attack(attack_name, attack_params)
             partitions[i] = prepare_dataset(partitions[i], attack_obj)
+
+        partition_audits.append(
+            audit_partition(i, original_labels[i], labels(partitions[i]), attack_params.get("flip_map", {}), attack_obj is not None)
+        )
 
         model_to_use = PoisonedLightningModel(original_model.model, node_addr=address)
         node = Node(
@@ -317,7 +348,8 @@ def mnist(
             register_attack(address, attack_obj)
             attack_obj.on_attach(node)
         logger.info(node.addr, f"node: {i}")
-        logger.info(node.addr, f"Node {i} | Adversary: {i in adversary_indices} | Attack: {attack_name if i in adversary_indices else 'N/A'}")
+        node_attack = attack_name if i in adversary_indices else "N/A"
+        logger.info(node.addr, f"Node {i} | Adversary: {i in adversary_indices} | Attack: {node_attack}")
         nodes.append(node)
 
     try:
@@ -343,13 +375,44 @@ def mnist(
         nodes[0].set_start_learning(rounds=r, epochs=e, trainset_size=5)
         wait_to_finish(nodes, timeout=60 * 60)
 
+        global_logs = logger.get_global_logs()
+        metric_rows = []
+        for experiment_nodes in global_logs.values():
+            for node_id, node_metrics in experiment_nodes.items():
+                for metric, values in node_metrics.items():
+                    metric_rows.extend(
+                        {"node_id": node_id, "metric": metric, "round": round_number, "value": value} for round_number, value in values
+                    )
+        participating = [f"node-{i}" for i in range(n)]
+        write_evidence(
+            config.output_dir,
+            {
+                "lifecycle_stage": "dataset_preparation_after_partitioning_before_node_creation",
+                "malicious_node_ids": [f"node-{i}" for i in adversary_indices],
+                "source_target_labels": {str(key): value for key, value in attack_params.get("flip_map", {}).items()},
+                "original_dataset_unchanged": labels(data) == source_labels_before,
+                "partitions": partition_audits,
+                "rounds": [
+                    {
+                        "round": round_number,
+                        "participating_node_ids": participating,
+                        "malicious_participant_ids": [node for node in participating if int(node.split("-")[1]) in adversary_indices],
+                        "attack_application_counts": {row["node_id"]: row["attack_application_count"] for row in partition_audits},
+                        "per_node_metrics": [row for row in metric_rows if row["round"] == round_number],
+                    }
+                    for round_number in range(r)
+                ],
+                "final_model_sha256": parameter_hash(nodes[0].get_model().get_parameters()),
+            },
+        )
+
         if config.show_metrics:
             global_logs = logger.get_global_logs()
             rows = []
             if global_logs != {}:
                 logs_g = list(global_logs.items())[0][1]
                 for node_name, node_metrics in logs_g.items():
-                    safe_node_name = re.sub(r'[^a-zA-Z0-9_-]', '_', node_name)
+                    safe_node_name = re.sub(r"[^a-zA-Z0-9_-]", "_", node_name)
                     for metric, values in node_metrics.items():
                         x, y = zip(*values, strict=False)
                         for round_num, val in values:
@@ -405,20 +468,24 @@ if __name__ == "__main__":
 
     # Launch experiment
     try:
-        config = load_experiment_config(args.config) if args.config else _config_from_legacy_args(
-            args.nodes,
-            args.rounds,
-            args.epochs,
-            args.show_metrics,
-            args.measure_time,
-            args.protocol,
-            args.framework,
-            args.aggregator,
-            args.reduced_dataset,
-            args.topology,
-            args.batch_size,
-            args.save_csv,
-            args.output_dir,
+        config = (
+            load_experiment_config(args.config)
+            if args.config
+            else _config_from_legacy_args(
+                args.nodes,
+                args.rounds,
+                args.epochs,
+                args.show_metrics,
+                args.measure_time,
+                args.protocol,
+                args.framework,
+                args.aggregator,
+                args.reduced_dataset,
+                args.topology,
+                args.batch_size,
+                args.save_csv,
+                args.output_dir,
+            )
         )
         if not args.config:
             config = replace(config, seed=args.seed)
