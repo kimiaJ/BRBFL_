@@ -423,13 +423,17 @@ def mnist(
                         "participating_node_ids": participating,
                         "malicious_participant_ids": [node for node in participating if int(node.split("-")[1]) in adversary_indices],
                         "attack_application_counts": {
-                            f"node-{i}": int(attack_name == "sign_flipping" and i in adversary_indices) for i in range(n)
+                            f"node-{i}": (
+                                sum(event["round_id"] == str(round_number) for event in model_update_audits[f"node-{i}"].events)
+                                if f"node-{i}" in model_update_audits
+                                else 0
+                            )
+                            for i in range(n)
                         }
                         if attack_name == "sign_flipping"
                         else {row["node_id"]: row["attack_application_count"] for row in partition_audits},
                         "model_update_transformations": {
-                            node_id: next(event for event in audit.events if event["round_id"] == str(round_number))
-                            for node_id, audit in model_update_audits.items()
+                            node_id: audit.evidence_for_round(round_number) for node_id, audit in model_update_audits.items()
                         },
                         "model_update_transmissions": {
                             node_id: [event for event in audit.transmissions if event["round_id"] == str(round_number)]
