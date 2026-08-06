@@ -63,6 +63,18 @@ incremented value. Thus `rounds: 2` normally trains rounds 0 and 1 and may also
 produce an evaluation event at framework value 2; these are separate from
 logical attack applications and per-recipient network transmissions.
 
+The later `{'0': 3, '1': 2}` failure counted serialization-hook observations
+as if each were a newly eligible update. In the observed full-mesh gossip,
+node-1 serialized three successive payloads in round 0 and two in round 1 as
+its partial aggregate gained contributors. Those payloads explain the 3/2
+topology-dependent hook counts; they are neither retries of the same Python
+object nor three/two locally trained updates. The audit now identifies an
+eligible logical update by producer node, training round, and its pre-attack
+parameter hash. It separately records eligible updates, logical applications,
+hook invocations, actual recipient transmissions, and aggregation
+observations. Only the locally trained payload is transformed; later partial
+aggregate serializations are observations and are left unchanged.
+
 ## Interpretation and limitation
 
 Passing validation proves that sign flipping executed exactly as configured

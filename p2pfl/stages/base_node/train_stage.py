@@ -74,6 +74,9 @@ class TrainStage(Stage):
             trace("local_training_started")
             learner.fit()
             logger.info(state.addr, "🎓 Training done.")
+            local_update_recorder = getattr(learner.get_model(), "record_local_update", None)
+            if local_update_recorder is not None:
+                local_update_recorder()
             trace("local_training_completed")
 
             check_early_stop(state)
