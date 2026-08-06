@@ -1,0 +1,42 @@
+{
+  "all_requested_outputs_identical": true,
+  "comparisons": {
+    "data_partitions": {
+      "classification": "identical",
+      "exact": true
+    },
+    "final_model_parameters": {
+      "classification": "identical",
+      "exact": true,
+      "max_absolute_difference": 0.0
+    },
+    "initial_model_parameters": {
+      "classification": "identical",
+      "exact": true,
+      "max_absolute_difference": 0.0
+    },
+    "participating_nodes": {
+      "classification": "identical",
+      "exact": true
+    },
+    "per_round_accuracy": {
+      "classification": "identical",
+      "exact": true
+    },
+    "per_round_loss": {
+      "classification": "identical",
+      "exact": true
+    }
+  },
+  "config_path": "configs/smoke/mnist_clean.yaml",
+  "configuration_identical": true,
+  "environment": {
+    "numpy": "1.26.4",
+    "platform": "Linux-6.12.13-x86_64-with-glibc2.39",
+    "python": "3.12.13"
+  },
+  "numerical_tolerance": {
+    "absolute": 1e-12,
+    "relative": 0.0
+  }
+}

@@ -1,9 +1,9 @@
 nodes: 3
-rounds: 1
+rounds: 2
 epochs: 1
 seed: 666
 protocol: memory
-framework: pytorch
+framework: numpy
 aggregator: fedavg
 topology: full
 batch_size: 128
@@ -12,10 +12,10 @@ measure_time: false
 save_csv: true
 output_dir: results/smoke/mnist_clean
 dataset:
-  name: p2pfl/MNIST
+  name: synthetic-mnist
   distribution: iid
-  reduced: true
-  partition_multiplier: 50
+  reduced: false
+  partition_multiplier: 1
 attack:
   name: none
   adversaries: []
