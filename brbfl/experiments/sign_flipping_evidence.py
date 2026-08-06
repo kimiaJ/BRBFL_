@@ -82,7 +82,10 @@ class AuditedModelUpdateAttack:
         self.tolerance = tolerance
         self._round_provider = round_provider
         self._cache: dict[str, list[np.ndarray]] = {}
-        self._post_hash_to_update_id: dict[str, str] = {}
+        # An attacked payload is only a retry within the round that produced it.
+        # Scoping this index by round prevents a later locally trained update
+        # with the same bytes from being mistaken for an earlier transmission.
+        self._post_hash_to_update_id: dict[tuple[str, str], str] = {}
         self._lock = threading.Lock()
         self.events: list[dict[str, Any]] = []
         self.transmissions: list[dict[str, Any]] = []
@@ -100,7 +103,7 @@ class AuditedModelUpdateAttack:
         with self._lock:
             # Defensive handling for a caller that passes our output back through
             # the hook.  It is a transmission, never a new mathematical attack.
-            previously_attacked_id = self._post_hash_to_update_id.get(original_hash)
+            previously_attacked_id = self._post_hash_to_update_id.get((round_id, original_hash))
             if previously_attacked_id is not None:
                 update_id = previously_attacked_id
                 transformed = original
@@ -113,17 +116,43 @@ class AuditedModelUpdateAttack:
                 )
                 if _hash(original) != original_hash or _hash([_array(value) for value in parameters]) != original_hash:
                     raise AssertionError("evidence capture or attack mutated the original update")
-                evidence.update({"original_pre_attack_update_preserved": True, "round_id": round_id, "update_id": update_id})
+                evidence.update(
+                    {
+                        "original_pre_attack_update_preserved": True,
+                        "round_id": round_id,
+                        "update_id": update_id,
+                        "logical_application_count": 1,
+                    }
+                )
                 self.events.append(evidence)
                 self._cache[update_id] = [_array(value) for value in transformed]
-                self._post_hash_to_update_id[evidence["post_attack_sha256"]] = update_id
+                self._post_hash_to_update_id[(round_id, evidence["post_attack_sha256"])] = update_id
 
             post_hash = _hash([_array(value) for value in transformed])
             expected_hash = _hash(self._cache[update_id])
             if post_hash != expected_hash:
                 raise AssertionError("transmitted copies of an attacked update have different hashes")
-            self.transmissions.append({"round_id": round_id, "update_id": update_id, "post_attack_sha256": post_hash})
+            transmission_count = sum(item["update_id"] == update_id for item in self.transmissions) + 1
+            self.transmissions.append(
+                {
+                    "round_id": round_id,
+                    "update_id": update_id,
+                    "post_attack_sha256": post_hash,
+                    "transmission_count": transmission_count,
+                }
+            )
             return [_array(value) for value in transformed]
+
+    def evidence_for_round(self, round_id: Any) -> dict[str, Any]:
+        """Return one logical update and its separate transmission count."""
+        normalized_round = str(round_id)
+        matching_events = [event for event in self.events if event["round_id"] == normalized_round]
+        matching_transmissions = [item for item in self.transmissions if item["round_id"] == normalized_round]
+        if len(matching_events) != 1:
+            raise AssertionError(f"round {normalized_round} has {len(matching_events)} sign-flipping logical applications; expected one")
+        evidence = dict(matching_events[0])
+        evidence["transmission_count"] = len(matching_transmissions)
+        return evidence
 
     def on_attach(self, node: Any) -> None:
         """Forward node attachment to the preserved implementation."""
