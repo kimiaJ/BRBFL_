@@ -397,8 +397,13 @@ def mnist(
         participating = [f"node-{i}" for i in range(n)]
         if attack_name == "sign_flipping":
             for node_id, audit in model_update_audits.items():
-                if len(audit.events) != r:
-                    raise AssertionError(f"{node_id} sign flipping applied {len(audit.events)} times; expected once per round ({r})")
+                round_counts = {
+                    str(round_number): sum(event["round_id"] == str(round_number) for event in audit.events) for round_number in range(r)
+                }
+                if any(count != 1 for count in round_counts.values()) or len(audit.events) != r:
+                    raise AssertionError(
+                        f"{node_id} sign flipping logical applications by round were {round_counts}; expected one per round"
+                    )
         lifecycle_stage = (
             "update_transmission_after_local_training_before_aggregation"
             if attack_name == "sign_flipping"
@@ -423,7 +428,12 @@ def mnist(
                         if attack_name == "sign_flipping"
                         else {row["node_id"]: row["attack_application_count"] for row in partition_audits},
                         "model_update_transformations": {
-                            node_id: audit.events[round_number] for node_id, audit in model_update_audits.items()
+                            node_id: next(event for event in audit.events if event["round_id"] == str(round_number))
+                            for node_id, audit in model_update_audits.items()
+                        },
+                        "model_update_transmissions": {
+                            node_id: [event for event in audit.transmissions if event["round_id"] == str(round_number)]
+                            for node_id, audit in model_update_audits.items()
                         },
                         "per_node_metrics": [row for row in metric_rows if row["round"] == round_number],
                     }
