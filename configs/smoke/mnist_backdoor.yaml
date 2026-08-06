@@ -1,0 +1,27 @@
+nodes: 3
+rounds: 2
+epochs: 1
+seed: 666
+protocol: memory
+framework: pytorch
+aggregator: fedavg
+topology: full
+batch_size: 128
+show_metrics: false
+measure_time: false
+save_csv: true
+output_dir: results/backdoor-validation/attacked
+dataset:
+  name: p2pfl/MNIST
+  distribution: iid
+  reduced: true
+  partition_multiplier: 50
+attack:
+  name: backdoor
+  adversaries: [1]
+  parameters:
+    trigger_size: 3
+    trigger_value: 255.0
+    target_class: 2
+    poison_rate: 0.3
+    seed: 666
