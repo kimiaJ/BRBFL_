@@ -374,7 +374,7 @@ def mnist(
             connected = sum(1 for node in nodes if len(node.get_neighbors()) >= n - 1)
             print(f"   {connected}/{n} nodes fully connected...")
             if connected == n:
-                print(f"CONVERGENCE ACHIEVED in {int(time.time()-convergence_start)} seconds!")
+                print(f"CONVERGENCE ACHIEVED in {int(time.time() - convergence_start)} seconds!")
                 break
         else:
             print("Partial convergence — continuing anyway (safe for training)")
@@ -396,14 +396,8 @@ def mnist(
                     )
         participating = [f"node-{i}" for i in range(n)]
         if attack_name == "sign_flipping":
-            for node_id, audit in model_update_audits.items():
-                round_counts = {
-                    str(round_number): sum(event["round_id"] == str(round_number) for event in audit.events) for round_number in range(r)
-                }
-                if any(count != 1 for count in round_counts.values()) or len(audit.events) != r:
-                    raise AssertionError(
-                        f"{node_id} sign flipping logical applications by round were {round_counts}; expected one per round"
-                    )
+            for audit in model_update_audits.values():
+                audit.validate_eligible_updates()
         lifecycle_stage = (
             "update_transmission_after_local_training_before_aggregation"
             if attack_name == "sign_flipping"
@@ -417,11 +411,19 @@ def mnist(
                 "source_target_labels": {str(key): value for key, value in attack_params.get("flip_map", {}).items()},
                 "original_dataset_unchanged": labels(data) == source_labels_before,
                 "partitions": partition_audits,
+                "configured_rounds": r,
+                "model_update_event_trace": {node_id: audit.event_trace for node_id, audit in model_update_audits.items()},
                 "rounds": [
                     {
                         "round": round_number,
-                        "participating_node_ids": participating,
-                        "malicious_participant_ids": [node for node in participating if int(node.split("-")[1]) in adversary_indices],
+                        "participating_node_ids": [
+                            node_id
+                            for node_id in participating
+                            if node_id not in model_update_audits or model_update_audits[node_id].participated_in_round(round_number)
+                        ],
+                        "malicious_participant_ids": [
+                            node_id for node_id, audit in model_update_audits.items() if audit.participated_in_round(round_number)
+                        ],
                         "attack_application_counts": {
                             f"node-{i}": (
                                 sum(event["round_id"] == str(round_number) for event in model_update_audits[f"node-{i}"].events)
@@ -433,7 +435,9 @@ def mnist(
                         if attack_name == "sign_flipping"
                         else {row["node_id"]: row["attack_application_count"] for row in partition_audits},
                         "model_update_transformations": {
-                            node_id: audit.evidence_for_round(round_number) for node_id, audit in model_update_audits.items()
+                            node_id: audit.evidence_for_round(round_number)
+                            for node_id, audit in model_update_audits.items()
+                            if str(round_number) in audit.eligible_round_ids()
                         },
                         "model_update_transmissions": {
                             node_id: [event for event in audit.transmissions if event["round_id"] == str(round_number)]

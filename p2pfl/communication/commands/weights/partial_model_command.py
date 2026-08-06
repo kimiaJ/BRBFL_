@@ -20,6 +20,7 @@
 
 from collections.abc import Callable
 
+from brbfl.attacks import get_attack
 from p2pfl.communication.commands.command import Command
 from p2pfl.communication.commands.message.models_agregated_command import ModelsAggregatedCommand
 from p2pfl.communication.commands.message.pre_send_model_command import PreSendModelCommand
@@ -86,6 +87,10 @@ class PartialModelCommand(Command):
                 # Add model to aggregator
                 model = self.laerner.get_model().build_copy(params=weights, num_samples=num_samples, contributors=list(contributors))
                 models_added = self.aggregator.add_model(model)
+                attack = get_attack(self.state.addr)
+                trace = getattr(attack, "trace", None)
+                if trace is not None:
+                    trace("update_received_for_aggregation", source=source, contributors=list(contributors))
                 if models_added != []:
                     # Communicate Aggregation
                     self.communication_protocol.broadcast(
