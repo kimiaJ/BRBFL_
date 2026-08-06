@@ -20,14 +20,15 @@
 
 import lightning as L
 import torch
-from p2pfl.management.logger import logger
 from torchmetrics import Accuracy, Metric
 
-from p2pfl.learning.frameworks.pytorch.lightning_model import LightningModel
+from brbfl.attacks import get_attack, poison_training_batch
 from brbfl.attacks.poisoned_model import PoisonedLightningModel
+from brbfl.evaluation.metrics import backdoor_evaluation_configured
+from p2pfl.learning.frameworks.pytorch.lightning_model import LightningModel
 from p2pfl.settings import Settings
 from p2pfl.utils.seed import set_seed
-from brbfl.attacks import get_attack, poison_training_batch
+
 ####
 # Example MLP
 ####
@@ -97,17 +98,17 @@ class MLP(L.LightningModule):
         return torch.optim.Adam(self.parameters(), lr=self.lr_rate)
 
     def training_step(self, batch: dict[str, torch.Tensor], batch_id: int) -> torch.Tensor:
+        """Train on one local batch after any configured online data attack."""
         x = batch["image"].float()
         y = batch["label"]
 
         attack = get_attack(getattr(self, "node_addr", None))
         x, y = poison_training_batch((x, y), attack)
-            
 
         logits = self(x)
         loss = torch.nn.functional.cross_entropy(logits, y)
-        if attack :
-            loss *= 30.0 
+        if attack:
+            loss *= 30.0
         acc = (logits.argmax(dim=1) == y).float().mean()
 
         self.log("train_loss", loss, prog_bar=True)
@@ -119,6 +120,7 @@ class MLP(L.LightningModule):
         raise NotImplementedError("Validation step not implemented")
 
     def test_step(self, batch: dict[str, torch.Tensor], batch_id: int) -> torch.Tensor:
+        """Evaluate loss, accuracy, and ASR only when a trigger is configured."""
         x = batch["image"].float()
         y = batch["label"]
 
@@ -127,31 +129,27 @@ class MLP(L.LightningModule):
         pred = logits.argmax(dim=1)
         acc = (pred == y).float().mean()
 
-        # BACKDOOR ASR — on clean test data
         attack = get_attack(getattr(self, "node_addr", None))
-        
-        x_trigger = x.clone()
-        trigger_size = 16
-        if attack and hasattr(attack, "trigger_size"):
-            trigger_size = attack.trigger_size
-        if x.dim() == 4:
-            x_trigger[:, :, -trigger_size:, -trigger_size:] = 1.0
-        elif x.dim() == 3:
-            x_trigger[:, -trigger_size:, -trigger_size:] = 1.0
-
-        pred_trigger = self(x_trigger).argmax(dim=1)
-        asr = (pred_trigger == 2).float().mean()
-
         self.log("test_loss", loss)
         self.log("test_metric", acc)
-        self.log("backdoor_asr", asr)
+        # ASR is meaningful only when a trigger attack supplies its evaluation
+        # semantics.  Previously this was an unconditional target-class rate.
+        if backdoor_evaluation_configured(attack):
+            x_trigger = x.clone()
+            if x.dim() == 4:
+                x_trigger[:, :, -attack.trigger_size :, -attack.trigger_size :] = attack.trigger_value
+            elif x.dim() == 3:
+                x_trigger[:, -attack.trigger_size :, -attack.trigger_size :] = attack.trigger_value
+            pred_trigger = self(x_trigger).argmax(dim=1)
+            self.log("backdoor_asr", (pred_trigger == attack.target_class).float().mean())
 
         return loss
 
 
 # Export P2PFL model
 def model_build_fn(*args, **kwargs) -> LightningModel:
-    """Export the model build function.
+    """
+    Export the model build function.
 
     If a `node_addr` is supplied in kwargs the wrapper `PoisonedLightningModel`
     will be used so any attack.manipulate_update() scaling is applied when the

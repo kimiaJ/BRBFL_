@@ -42,6 +42,7 @@ from brbfl.experiments.config import TopologyType as ConfigTopologyType
 from brbfl.experiments.datasets import partition_dataset
 from brbfl.experiments.manifest import write_manifest
 from brbfl.experiments.reproducibility import seed_everything
+from brbfl.experiments.sign_flipping_evidence import AuditedModelUpdateAttack
 from p2pfl.communication.protocols.protobuff.grpc import GrpcCommunicationProtocol
 from p2pfl.communication.protocols.protobuff.memory import MemoryCommunicationProtocol
 from p2pfl.learning.aggregators.scaffold import Scaffold
@@ -318,6 +319,7 @@ def mnist(
     attack_params = config.attack.parameters
     clear_attacks()
     partition_audits = []
+    model_update_audits = {}
     for i in range(n):
         if config.protocol == "memory":
             address = f"node-{i}"
@@ -330,9 +332,18 @@ def mnist(
         if i in adversary_indices and attack_name != "none":
             attack_obj = create_attack(attack_name, attack_params)
             partitions[i] = prepare_dataset(partitions[i], attack_obj)
+            if attack_name == "sign_flipping":
+                attack_obj = AuditedModelUpdateAttack(attack_obj, [name for name, _ in original_model.model.named_parameters()])
+                model_update_audits[f"node-{i}"] = attack_obj
 
         partition_audits.append(
-            audit_partition(i, original_labels[i], labels(partitions[i]), attack_params.get("flip_map", {}), attack_obj is not None)
+            audit_partition(
+                i,
+                original_labels[i],
+                labels(partitions[i]),
+                attack_params.get("flip_map", {}),
+                attack_obj is not None and attack_name == "label_flipping",
+            )
         )
 
         model_to_use = PoisonedLightningModel(original_model.model, node_addr=address)
@@ -384,10 +395,19 @@ def mnist(
                         {"node_id": node_id, "metric": metric, "round": round_number, "value": value} for round_number, value in values
                     )
         participating = [f"node-{i}" for i in range(n)]
+        if attack_name == "sign_flipping":
+            for node_id, audit in model_update_audits.items():
+                if len(audit.events) != r:
+                    raise AssertionError(f"{node_id} sign flipping applied {len(audit.events)} times; expected once per round ({r})")
+        lifecycle_stage = (
+            "update_transmission_after_local_training_before_aggregation"
+            if attack_name == "sign_flipping"
+            else "dataset_preparation_after_partitioning_before_node_creation"
+        )
         write_evidence(
             config.output_dir,
             {
-                "lifecycle_stage": "dataset_preparation_after_partitioning_before_node_creation",
+                "lifecycle_stage": lifecycle_stage,
                 "malicious_node_ids": [f"node-{i}" for i in adversary_indices],
                 "source_target_labels": {str(key): value for key, value in attack_params.get("flip_map", {}).items()},
                 "original_dataset_unchanged": labels(data) == source_labels_before,
@@ -397,7 +417,14 @@ def mnist(
                         "round": round_number,
                         "participating_node_ids": participating,
                         "malicious_participant_ids": [node for node in participating if int(node.split("-")[1]) in adversary_indices],
-                        "attack_application_counts": {row["node_id"]: row["attack_application_count"] for row in partition_audits},
+                        "attack_application_counts": {
+                            f"node-{i}": int(attack_name == "sign_flipping" and i in adversary_indices) for i in range(n)
+                        }
+                        if attack_name == "sign_flipping"
+                        else {row["node_id"]: row["attack_application_count"] for row in partition_audits},
+                        "model_update_transformations": {
+                            node_id: audit.events[round_number] for node_id, audit in model_update_audits.items()
+                        },
                         "per_node_metrics": [row for row in metric_rows if row["round"] == round_number],
                     }
                     for round_number in range(r)
