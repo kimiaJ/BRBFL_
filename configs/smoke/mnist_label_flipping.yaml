@@ -10,13 +10,14 @@ batch_size: 128
 show_metrics: false
 measure_time: false
 save_csv: true
-output_dir: results/label-flipping-validation/clean
+output_dir: results/label-flipping-validation/attacked
 dataset:
   name: p2pfl/MNIST
   distribution: iid
   reduced: true
   partition_multiplier: 50
 attack:
-  name: none
-  adversaries: []
-  parameters: {}
+  name: label_flipping
+  adversaries: [1]
+  parameters:
+    flip_map: {1: 7}

@@ -2,7 +2,7 @@
 
 ## Scope
 
-This report covers two executions of `configs/smoke/mnist_clean.yaml` at seed
+This report covers two executions of `configs/smoke/mnist_numpy_clean.yaml` at seed
 `666`. The smoke configuration deliberately uses the repository's small,
 synthetic MNIST-shaped data set and the NumPy reference trainer. This makes the
 check independent of network downloads, GPU kernels, worker scheduling, and

@@ -180,7 +180,7 @@ def main() -> None:
     """Run the command-line interface."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--single-run", nargs=2, metavar=("CONFIG", "OUTPUT_DIR"))
-    parser.add_argument("--config", type=Path, default=Path("configs/smoke/mnist_clean.yaml"))
+    parser.add_argument("--config", type=Path, default=Path("configs/smoke/mnist_numpy_clean.yaml"))
     parser.add_argument("--output-dir", type=Path, default=Path("results/reproducibility"))
     arguments = parser.parse_args()
     if arguments.single_run:
