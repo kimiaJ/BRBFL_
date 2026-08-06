@@ -26,7 +26,27 @@ def test_sign_flipping_is_exact_once_and_preserves_original():
     assert event["cosine_similarity"] == pytest.approx(-1.0)
     assert event["maximum_transformation_error"] <= event["numerical_tolerance"]
     assert event["original_pre_attack_update_preserved"] is True
+    assert event["post_attack_l2_norm"] == pytest.approx(3 * event["pre_attack_l2_norm"])
     assert [item["name"] for item in event["parameters"]] == ["weight", "bias"]
+
+
+def test_one_update_can_be_transmitted_repeatedly_without_reapplying_attack():
+    """Recipient sends and retries reuse one attacked update byte-for-byte."""
+    update = [np.array([2.0, -4.0], dtype=np.float32)]
+    before = [value.copy() for value in update]
+    attack = AuditedModelUpdateAttack(create_attack("sign_flipping", {"scale": -3.0}), ["weight"], round_provider=lambda: 0)
+
+    sent = [attack.manipulate_update(update) for _recipient_or_retry in range(3)]
+    # Even accidentally feeding an already attacked copy through the hook must
+    # not turn -3 into 9 (or a later retry into -27).
+    resent = attack.manipulate_update(sent[0])
+
+    assert len(attack.events) == 1
+    assert len(attack.transmissions) == 4
+    assert all(np.array_equal(value, before_value) for value, before_value in zip(update, before, strict=True))
+    assert all(np.array_equal(copy[0], -3.0 * before[0]) for copy in [*sent, resent])
+    assert len({event["update_id"] for event in attack.transmissions}) == 1
+    assert len({event["post_attack_sha256"] for event in attack.transmissions}) == 1
 
 
 def test_sign_flipping_configs_match_controls():
