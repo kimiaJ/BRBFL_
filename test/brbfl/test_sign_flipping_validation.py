@@ -1,6 +1,7 @@
 """Controlled assertions for sign-flipping validation evidence."""
 
 import json
+import threading
 
 import numpy as np
 import pytest
@@ -8,7 +9,7 @@ import pytest
 from brbfl.attacks import create_attack
 from brbfl.experiments.compare_sign_flipping import compare
 from brbfl.experiments.config import load_experiment_config
-from brbfl.experiments.sign_flipping_evidence import AuditedModelUpdateAttack
+from brbfl.experiments.sign_flipping_evidence import AuditedModelUpdateAttack, canonical_parameter_hash
 
 
 def test_sign_flipping_is_exact_once_and_preserves_original():
@@ -55,6 +56,87 @@ def test_one_update_can_be_transmitted_repeatedly_without_reapplying_attack():
     assert len({event["post_attack_sha256"] for event in attack.transmissions}) == 1
     assert attack.evidence_for_round(0)["logical_application_count"] == 1
     assert attack.evidence_for_round(0)["transmission_count"] == 4
+    assert len({item["logical_application_id"] for item in attack.transmissions}) == 1
+    assert len({item["hook_invocation_id"] for item in attack.transmissions}) == 4
+    assert [item["cached_result_reused"] for item in attack.transmissions] == [False, True, True, True]
+
+
+def test_canonical_parameter_hash_ignores_mapping_and_transport_metadata_order():
+    """Only sorted, named parameter content participates in the digest."""
+    weight = np.array([1.0, -2.0], dtype=np.float32)
+    bias = np.array([3.0], dtype=np.float64)
+    first = {"weight": weight, "bias": bias}
+    second = {"bias": bias.copy(), "weight": weight.copy()}
+
+    assert canonical_parameter_hash(first) == canonical_parameter_hash(second)
+    assert canonical_parameter_hash(first) == canonical_parameter_hash(first, names=["ignored", "metadata"])
+
+
+def test_transmission_copies_and_cached_snapshot_are_independent():
+    """Mutating one recipient's payload cannot alter another send or the cache."""
+    update = [np.array([2.0, -4.0], dtype=np.float32)]
+    attack = AuditedModelUpdateAttack(create_attack("sign_flipping", {"scale": -3.0}), ["weight"], round_provider=lambda: 0)
+    attack.record_update_created(update)
+
+    first = attack.manipulate_update(update)
+    attack.record_transmission("node-0")
+    first[0][0] = 999.0
+    second = attack.manipulate_update(update)
+    attack.record_transmission("node-2")
+
+    assert np.array_equal(second[0], np.array([-6.0, 12.0], dtype=np.float32))
+    assert np.array_equal(attack._cache[attack.events[0]["update_id"]][0], second[0])
+    assert len({item["post_attack_sha256"] for item in attack.transmissions}) == 1
+
+
+def test_concurrent_transmission_keeps_its_own_hook_observation():
+    """A concurrent aggregate serialization cannot relabel a local-update send."""
+    attack = AuditedModelUpdateAttack(create_attack("sign_flipping", {"scale": -3.0}), ["weight"], round_provider=lambda: 0)
+    local = [np.array([2.0], dtype=np.float32)]
+    attack.record_update_created(local)
+    local_hook_finished = threading.Event()
+    aggregate_hook_finished = threading.Event()
+
+    def send_local():
+        attack.manipulate_update(local)
+        local_hook_finished.set()
+        aggregate_hook_finished.wait()
+        attack.record_transmission("node-0")
+
+    def send_aggregate():
+        local_hook_finished.wait()
+        attack.manipulate_update([np.array([7.0], dtype=np.float32)])
+        aggregate_hook_finished.set()
+        attack.record_transmission("node-2")
+
+    threads = [threading.Thread(target=send_local), threading.Thread(target=send_aggregate)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    local_transmission = next(item for item in attack.transmissions if item["recipient"] == "node-0")
+    aggregate_transmission = next(item for item in attack.transmissions if item["recipient"] == "node-2")
+    assert local_transmission["update_id"] == attack.events[0]["update_id"]
+    assert local_transmission["post_attack_sha256"] == attack.events[0]["post_attack_sha256"]
+    assert aggregate_transmission["update_id"] is None
+
+
+def test_different_pre_attack_updates_have_different_logical_ids():
+    """Two local states in one producer/round cannot be grouped by metadata."""
+    attack = AuditedModelUpdateAttack(create_attack("sign_flipping", {"scale": -3.0}), ["weight"], round_provider=lambda: 0)
+    first = [np.array([1.0], dtype=np.float32)]
+    second = [np.array([2.0], dtype=np.float32)]
+    attack.record_update_created(first)
+    attack.record_update_created(second)
+    attack.manipulate_update(first)
+    attack.record_transmission("node-0")
+    attack.manipulate_update(second)
+    attack.record_transmission("node-2")
+
+    assert len(attack.events) == 2
+    assert len({event["pre_attack_sha256"] for event in attack.events}) == 2
+    assert len({event["update_id"] for event in attack.events}) == 2
 
 
 def test_distinct_round_updates_each_have_one_logical_application():
