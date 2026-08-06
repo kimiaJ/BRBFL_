@@ -11,7 +11,28 @@ import numpy as np
 
 
 def _array(value: Any) -> np.ndarray:
+    """Return a detached, owning CPU snapshot of one parameter."""
+    if hasattr(value, "detach"):
+        value = value.detach().cpu()
     return np.asarray(value).copy()
+
+
+def _parameter_summaries(values: Sequence[Any], names: Sequence[str]) -> list[dict[str, Any]]:
+    """Describe values and storage without retaining mutable tensor references."""
+    summaries = []
+    for name, value in zip(names, values, strict=True):
+        array = np.asarray(value)
+        summaries.append(
+            {
+                "name": name,
+                "dtype": array.dtype.str,
+                "shape": list(array.shape),
+                "storage_address": int(array.__array_interface__["data"][0]),
+                "owns_storage": bool(array.flags.owndata),
+                "sample": array.ravel()[:3].tolist(),
+            }
+        )
+    return summaries
 
 
 def canonical_parameter_hash(values: Mapping[str, Any] | Sequence[Any], names: Sequence[str] | None = None) -> str:
@@ -26,11 +47,7 @@ def canonical_parameter_hash(values: Mapping[str, Any] | Sequence[Any], names: S
 
     digest = hashlib.sha256()
     for name, value in sorted(named_values, key=lambda item: item[0]):
-        # np.asarray(torch_tensor.detach().cpu()) supplies exact detached CPU
-        # bytes for framework tensors while the copy isolates later mutation.
-        if hasattr(value, "detach"):
-            value = value.detach().cpu()
-        contiguous = np.ascontiguousarray(np.asarray(value).copy())
+        contiguous = np.ascontiguousarray(_array(value))
         digest.update(name.encode("utf-8"))
         digest.update(b"\0")
         digest.update(contiguous.dtype.str.encode("ascii"))
@@ -140,7 +157,7 @@ class AuditedModelUpdateAttack:
         return "unassigned" if value is None else str(value)
 
     def manipulate_update(self, parameters: list[Any]) -> list[Any]:
-        """Transform one copied update and prove the caller's input was not mutated."""
+        """Return a copy of the cached transformation for a recognized snapshot."""
         original = [_array(value) for value in parameters]
         original_hash = canonical_parameter_hash(original, self.parameter_names)
         round_id = self._round_id()
@@ -161,31 +178,6 @@ class AuditedModelUpdateAttack:
             elif update_id in self._cache:
                 transformed = [value.copy() for value in self._cache[update_id]]
                 reused = True
-            elif update_id in self._eligible:
-                snapshot = self._original_snapshots[update_id]
-                transformed = self.attack.manipulate_update([value.copy() for value in snapshot])
-                logically_applied = True
-                evidence = transformation_evidence(
-                    snapshot, transformed, self.parameter_names, float(self.attack.params["scale"]), self.tolerance
-                )
-                if (
-                    canonical_parameter_hash(snapshot, self.parameter_names) != original_hash
-                    or canonical_parameter_hash(parameters, self.parameter_names) != original_hash
-                ):
-                    raise AssertionError("evidence capture or attack mutated the original update")
-                evidence.update(
-                    {
-                        "original_pre_attack_update_preserved": True,
-                        "round_id": round_id,
-                        "update_id": update_id,
-                        "logical_application_count": 1,
-                        "logical_application_id": f"{update_id}:application-1",
-                    }
-                )
-                self.events.append(evidence)
-                self._cache[update_id] = [_array(value) for value in transformed]
-                self._post_hash_to_update_id[(round_id, evidence["post_attack_sha256"])] = update_id
-                self.trace("sign_flipping_logically_applied", **evidence)
             else:
                 # P2PFL serializes successive partial aggregates while gossiping.
                 # They may contain this node's contribution, but are not new
@@ -203,8 +195,10 @@ class AuditedModelUpdateAttack:
                 "post_attack_sha256": post_hash,
                 "transformed": logically_applied,
                 "cached_result_reused": reused,
+                "transformation_newly_applied": logically_applied,
                 "logical_application_id": (f"{update_id}:application-1" if expected is not None else None),
                 "hook_invocation_id": hook_invocation_id,
+                "lifecycle_stage": "hook_invocation",
             }
             self.hook_invocations.append(observation)
             self._thread_state.last_hook_observation = observation
@@ -218,29 +212,52 @@ class AuditedModelUpdateAttack:
             return [_array(value) for value in transformed]
 
     def record_update_created(self, parameters: list[Any]) -> None:
-        """Register one locally trained update as eligible before serialization."""
+        """Freeze and transform one completed local update exactly once."""
         original = [_array(value) for value in parameters]
         original_hash = canonical_parameter_hash(original, self.parameter_names)
         update_id = self._update_id(self._round_id(), original_hash)
-        self._eligible.setdefault(
-            update_id,
-            {
+        with self._lock:
+            if update_id in self._eligible:
+                return
+            snapshot = [value.copy() for value in original]
+            self._eligible[update_id] = {
                 "node_id": self.node_id,
                 "round_id": self._round_id(),
                 "update_id": update_id,
                 "pre_attack_sha256": original_hash,
-            },
-        )
-        self._original_snapshots.setdefault(update_id, [value.copy() for value in original])
-        self.trace(
-            "local_update_created",
-            update_id=update_id,
-            pre_attack_sha256=original_hash,
-        )
+                "lifecycle_stage": "local_update_creation",
+            }
+            self._original_snapshots[update_id] = snapshot
+            self.trace("local_update_created", update_id=update_id, pre_attack_sha256=original_hash)
+            transformed = self.attack.manipulate_update([value.copy() for value in snapshot])
+            evidence = transformation_evidence(
+                snapshot, transformed, self.parameter_names, float(self.attack.params["scale"]), self.tolerance
+            )
+            if canonical_parameter_hash(snapshot, self.parameter_names) != original_hash:
+                raise AssertionError("logical transformation mutated the immutable original snapshot")
+            evidence.update(
+                {
+                    "original_pre_attack_update_preserved": True,
+                    "round_id": self._round_id(),
+                    "update_id": update_id,
+                    "logical_application_count": 1,
+                    "logical_application_id": f"{update_id}:application-1",
+                    "lifecycle_stage": "logical_transformation",
+                    "transformation_newly_applied": True,
+                    "cached_result_reused": False,
+                    "original_storage": _parameter_summaries(snapshot, self.parameter_names),
+                    "transformed_storage": _parameter_summaries(transformed, self.parameter_names),
+                }
+            )
+            self.events.append(evidence)
+            self._cache[update_id] = [_array(value) for value in transformed]
+            self._post_hash_to_update_id[(self._round_id(), evidence["post_attack_sha256"])] = update_id
+            self.trace("sign_flipping_logically_applied", **evidence)
 
     def record_transmission(self, recipient: str) -> None:
         """Associate a completed gossip serialization with its recipient."""
         observation = getattr(self._thread_state, "last_hook_observation", None)
+        self._thread_state.last_hook_observation = None
         if observation is not None and observation["round_id"] == self._round_id():
             transmission_count = sum(item["round_id"] == self._round_id() for item in self.transmissions) + 1
             self._transmission_sequence += 1
@@ -250,6 +267,7 @@ class AuditedModelUpdateAttack:
                 "recipient": recipient,
                 "transmission_sequence": self._transmission_sequence,
                 "transmission_count": transmission_count,
+                "lifecycle_stage": "transmission",
             }
             self.transmissions.append(item)
             self.trace(
