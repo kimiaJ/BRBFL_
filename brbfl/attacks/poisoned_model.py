@@ -2,6 +2,7 @@
 from p2pfl.learning.frameworks.pytorch.lightning_model import LightningModel
 from typing import List, Any, Optional
 import numpy as np
+from .lifecycle import poison_model_update
 from .registry import get_attack
 import copy
 
@@ -33,13 +34,14 @@ class PoisonedLightningModel(LightningModel):
 
         # Store only the address (serialization-safe!)
         self.node_addr = node_addr
+        # Lightning invokes training_step on the wrapped module, so give the
+        # online data-poisoning hook the same registry key.
+        self.model.node_addr = node_addr
 
     def get_parameters(self) -> List[np.ndarray]:
         params = super().get_parameters()
         attack = get_attack(self.node_addr) if self.node_addr else None
-        if attack:
-            params = attack.manipulate_update(params)
-        return params
+        return poison_model_update(params, attack)
 
     # Optional: make copying work cleanly
     def __deepcopy__(self, memo):

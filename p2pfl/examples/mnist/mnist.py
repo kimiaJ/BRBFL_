@@ -26,33 +26,22 @@ import re
 import os
 from dataclasses import replace
 from datetime import datetime, timezone
-from p2pfl.examples.mnist.attacks.colluding_backdoor import ColludingBackdoorAttack
-from p2pfl.examples.mnist.attacks.delay_drop import DelayDropAttack
-from p2pfl.examples.mnist.attacks.sybil_backdoor import SybilBackdoorAttack
 import torch
 import pandas as pd
 import matplotlib.pyplot as plt
 import argparse
 import time
-from typing import Optional
 import uuid
 from pathlib import Path
 
 
 
-from p2pfl.examples.mnist.attacks.label_flipping import LabelFlippingAttack
-from p2pfl.examples.mnist.attacks.sign_flipping import SignFlippingAttack
-from p2pfl.examples.mnist.attacks.scale import ScaleAttack
-from p2pfl.examples.mnist.attacks.base import BaseAttack
-from p2pfl.examples.mnist.attacks.registry import register_attack, clear_attacks
-from p2pfl.examples.mnist.attacks.poisoned_model import PoisonedLightningModel
-from p2pfl.examples.mnist.attacks.backdoor import BackdoorAttack
-from p2pfl.examples.mnist.attacks.free_rider import FreeRiderAttack
+from brbfl.attacks import clear_attacks, create_attack, prepare_dataset, register_attack
+from brbfl.attacks.poisoned_model import PoisonedLightningModel
 
 from p2pfl.communication.protocols.protobuff.grpc import GrpcCommunicationProtocol
 from p2pfl.communication.protocols.protobuff.memory import MemoryCommunicationProtocol
 
-from p2pfl.examples.mnist.attacks.model_replacement import ModelReplacementAttack
 from p2pfl.learning.aggregators.scaffold import Scaffold
 from p2pfl.learning.dataset.p2pfl_dataset import P2PFLDataset
 from p2pfl.learning.dataset.partition_strategies import RandomIIDPartitionStrategy
@@ -309,36 +298,11 @@ def mnist(
     clear_attacks()
     for i in range(n):
         address = f"node-{i}" if config.protocol == "memory" else f"unix:///tmp/p2pfl-{i}.sock" if config.protocol == "unix" else "127.0.0.1"
-        attack_obj: Optional[BaseAttack] = None
+        attack_obj = None
         original_model = model_fn()
         if i in adversary_indices and attack_name != "none":
-            if attack_name == "label_flipping":
-                attack_obj = LabelFlippingAttack(flip_map=attack_params.get("flip_map", {}))
-                partitions[i] = attack_obj.poison_data(partitions[i])
-            elif attack_name == "sign_flipping":
-                attack_obj = SignFlippingAttack(scale=-3.0)
-                original_get_params = original_model.get_parameters
-                def poisoned_get_parameters(attack_obj=attack_obj):
-                    params = original_get_params()
-                    return attack_obj.manipulate_update(params)
-                original_model.get_parameters = poisoned_get_parameters
-                print(f"[Node {i}] Patched get_parameters for sign flipping")
-            elif attack_name == "scale":
-                attack_obj = ScaleAttack(factor=attack_params.get("scale_factor", 3.0), apply_on=attack_params.get("scale_on", "delta"))
-                print(f"[Node {i}] ScaleAttack activated ×{attack_params.get('scale_factor', 3.0)} on {attack_params.get('scale_on', 'delta')}")
-            elif attack_name == "backdoor":
-                attack_obj = BackdoorAttack(trigger_size=4, target_class=2, poison_rate=0.3)
-            elif attack_name == "model_replacement":
-                attack_obj = ModelReplacementAttack(scaling_factor=3.0, trigger_size=16, target_class=2, poison_rate=1)
-                print(f"[Node {i}] MODEL REPLACEMENT ATTACK ACTIVATED (scaling={5000})")
-            elif attack_name == "sybil_backdoor":
-                attack_obj = SybilBackdoorAttack(trigger_size=16, target_class=2, poison_rate=1.0)
-            elif attack_name == "free_rider":
-                attack_obj = FreeRiderAttack("scale", scale=0.01)
-            elif attack_name == "delay_drop":
-                attack_obj = DelayDropAttack(mode="drop", drop_rate=0.8)
-            elif attack_name == "colluding_backdoor":
-                attack_obj = ColludingBackdoorAttack(scale_factor=20, poison_rate=1.0, trigger_size=48)
+            attack_obj = create_attack(attack_name, attack_params)
+            partitions[i] = prepare_dataset(partitions[i], attack_obj)
 
         model_to_use = PoisonedLightningModel(original_model.model, node_addr=address)
         node = Node(
