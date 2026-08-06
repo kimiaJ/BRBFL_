@@ -13,15 +13,16 @@ def compare(clean_path: Path, attacked_path: Path, output_path: Path) -> dict:
     if clean["malicious_node_ids"] or any(clean_round["model_update_transformations"] for clean_round in clean["rounds"]):
         raise AssertionError("clean run contains model-update attack evidence")
     trace = attacked.get("model_update_event_trace", {}).get("node-1", [])
-    trained = {event["framework_round"] for event in trace if event["event_type"] == "local_training_completed"}
-    transmitted = {event["framework_round"] for event in trace if event["event_type"] == "update_transmitted"}
-    eligible_rounds = trained & transmitted
-    applied = {event["framework_round"] for event in trace if event["event_type"] == "sign_flipping_logically_applied"}
-    if eligible_rounds != applied:
+    created = {event["update_id"]: event["framework_round"] for event in trace if event["event_type"] == "local_update_created"}
+    transmitted = {event["update_id"] for event in trace if event["event_type"] == "update_transmitted"}
+    eligible_ids = set(created) & transmitted
+    applied_ids = {event["update_id"] for event in trace if event["event_type"] == "sign_flipping_logically_applied"}
+    if eligible_ids != applied_ids:
         raise AssertionError(
             f"eligible malicious updates and logical sign-flipping applications differ: "
-            f"eligible={sorted(eligible_rounds)}, applied={sorted(applied)}"
+            f"eligible={sorted(eligible_ids)}, applied={sorted(applied_ids)}"
         )
+    eligible_rounds = {created[update_id] for update_id in eligible_ids}
     for clean_round, attacked_round in zip(clean["rounds"], attacked["rounds"], strict=True):
         if clean_round["participating_node_ids"] != attacked_round["participating_node_ids"]:
             raise AssertionError("clean and attacked participants differ")

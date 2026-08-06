@@ -49,10 +49,14 @@ class PoisonedLightningModel(LightningModel):
         """Return parameters after applying the node's registered attack."""
         params = super().get_parameters()
         attack = get_attack(self.node_addr) if self.node_addr else None
+        return poison_model_update(params, attack)
+
+    def record_local_update(self) -> None:
+        """Register the newly trained, unmodified parameters with the audit."""
+        attack = get_attack(self.node_addr) if self.node_addr else None
         recorder = getattr(attack, "record_update_created", None)
         if recorder is not None:
-            recorder(params)
-        return poison_model_update(params, attack)
+            recorder(super().get_parameters())
 
     def build_copy(self, **kwargs):
         """

@@ -413,6 +413,18 @@ def mnist(
                 "partitions": partition_audits,
                 "configured_rounds": r,
                 "model_update_event_trace": {node_id: audit.event_trace for node_id, audit in model_update_audits.items()},
+                "model_update_counters": {
+                    node_id: {
+                        "eligible_logical_updates": len(audit.eligible_update_ids()),
+                        "logical_attack_applications": len(audit.events),
+                        "attack_hook_invocations": len(audit.hook_invocations),
+                        "network_transmissions": len(audit.transmissions),
+                        "aggregation_observations": sum(
+                            event["event_type"] == "update_received_for_aggregation" for event in audit.event_trace
+                        ),
+                    }
+                    for node_id, audit in model_update_audits.items()
+                },
                 "rounds": [
                     {
                         "round": round_number,

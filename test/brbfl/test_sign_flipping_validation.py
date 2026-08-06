@@ -16,6 +16,7 @@ def test_sign_flipping_is_exact_once_and_preserves_original():
     update = [np.array([1.5, -2.0], dtype=np.float32), np.array([[3.0]], dtype=np.float32)]
     before = [value.copy() for value in update]
     attack = AuditedModelUpdateAttack(create_attack("sign_flipping", {"scale": -3.0}), ["weight", "bias"])
+    attack.record_update_created(update)
 
     transformed = attack.manipulate_update(update)
 
@@ -35,11 +36,16 @@ def test_one_update_can_be_transmitted_repeatedly_without_reapplying_attack():
     update = [np.array([2.0, -4.0], dtype=np.float32)]
     before = [value.copy() for value in update]
     attack = AuditedModelUpdateAttack(create_attack("sign_flipping", {"scale": -3.0}), ["weight"], round_provider=lambda: 0)
+    attack.record_update_created(update)
 
-    sent = [attack.manipulate_update(update) for _recipient_or_retry in range(3)]
+    sent = []
+    for recipient in ("node-0", "node-2", "node-0"):
+        sent.append(attack.manipulate_update(update))
+        attack.record_transmission(recipient)
     # Even accidentally feeding an already attacked copy through the hook must
     # not turn -3 into 9 (or a later retry into -27).
     resent = attack.manipulate_update(sent[0])
+    attack.record_transmission("node-2")
 
     assert len(attack.events) == 1
     assert len(attack.transmissions) == 4
@@ -68,8 +74,11 @@ def test_distinct_round_updates_each_have_one_logical_application():
         # Deliberately reuse the list/array identities and identical metadata.
         update[0][...] = np.array([round_id + 1.0, -(round_id + 2.0)], dtype=np.float32)
         originals.append(update[0].copy())
+        attack.record_update_created(update)
         first = attack.manipulate_update(update)
+        attack.record_transmission("node-0")
         retry = attack.manipulate_update(update)
+        attack.record_transmission("node-2")
         transmitted.append((first, retry))
 
     assert [event["round_id"] for event in attack.events] == ["0", "1"]
@@ -94,15 +103,39 @@ def test_prior_round_attacked_bytes_are_a_new_update_in_the_next_round():
     """The retry index cannot collide across rounds, even when update bytes do."""
     current_round = 0
     attack = AuditedModelUpdateAttack(create_attack("sign_flipping", {"scale": -3.0}), ["weight"], round_provider=lambda: current_round)
+    attack.record_update_created([np.array([2.0], dtype=np.float32)])
     first = attack.manipulate_update([np.array([2.0], dtype=np.float32)])
 
     current_round = 1
+    attack.record_update_created(first)
     second = attack.manipulate_update(first)
 
     assert len(attack.events) == 2
     assert [attack.evidence_for_round(round_id)["logical_application_count"] for round_id in range(2)] == [1, 1]
     assert np.array_equal(first[0], np.array([-6.0], dtype=np.float32))
     assert np.array_equal(second[0], np.array([18.0], dtype=np.float32))
+
+
+def test_partial_aggregate_hook_observations_are_not_eligible_updates():
+    """Changing aggregate payloads explain raw hook counts without extra attacks."""
+    attack = AuditedModelUpdateAttack(create_attack("sign_flipping", {"scale": -3.0}), ["weight"], round_provider=lambda: 0)
+    local = [np.array([2.0], dtype=np.float32)]
+    attack.record_update_created(local)
+
+    attacked = attack.manipulate_update(local)
+    attack.record_transmission("node-0")
+    partial_one = attack.manipulate_update([np.array([5.0], dtype=np.float32)])
+    attack.record_transmission("node-2")
+    partial_two = attack.manipulate_update([np.array([7.0], dtype=np.float32)])
+    attack.record_transmission("node-0")
+
+    assert len(attack.hook_invocations) == 3
+    assert len(attack.transmissions) == 3
+    assert len(attack.events) == 1
+    assert attack.validate_eligible_updates() == {attack.events[0]["update_id"]: 1}
+    assert np.array_equal(attacked[0], np.array([-6.0], dtype=np.float32))
+    assert np.array_equal(partial_one[0], np.array([5.0], dtype=np.float32))
+    assert np.array_equal(partial_two[0], np.array([7.0], dtype=np.float32))
 
 
 def test_terminal_round_without_outbound_update_is_not_eligible():
@@ -129,6 +162,7 @@ def test_participant_absence_is_not_an_eligible_update():
 def test_eligible_transmission_that_bypasses_hook_fails_validation():
     """Observed training plus serialization cannot silently evade the attack."""
     attack = AuditedModelUpdateAttack(create_attack("sign_flipping", {"scale": -3.0}), ["weight"], round_provider=lambda: 1)
+    attack.record_update_created([np.array([1.0], dtype=np.float32)])
     attack.trace("local_training_completed")
     attack.record_transmission("node-0")
 
