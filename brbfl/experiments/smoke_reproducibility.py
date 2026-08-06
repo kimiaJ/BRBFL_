@@ -186,7 +186,13 @@ def main() -> None:
     if arguments.single_run:
         run_once(load_experiment_config(arguments.single_run[0]), Path(arguments.single_run[1]))
     else:
-        run_twice(arguments.config, arguments.output_dir)
+        comparison = run_twice(arguments.config, arguments.output_dir)
+        identical = sum(
+            result["classification"] == "identical" for result in comparison["comparisons"].values()
+        )
+        total = len(comparison["comparisons"])
+        status = "identical" if comparison["all_requested_outputs_identical"] else "different"
+        print(f"Reproducibility: {status} ({identical}/{total} outputs); artifacts: {arguments.output_dir}")
 
 
 if __name__ == "__main__":
