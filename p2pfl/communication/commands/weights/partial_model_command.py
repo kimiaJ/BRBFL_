@@ -129,8 +129,13 @@ class PartialModelCommand(Command):
                             transport_occurred=True,
                         )
                     models_added = self.aggregator.add_model(model)
-                else:
+                elif gate is None:
                     models_added = self.aggregator.reject_model(list(contributors))
+                else:
+                    # Validator admission is applied to aggregation membership
+                    # once, when the complete canonical ledger is finalized by
+                    # TrainStage.  A rejected transport is only discarded here.
+                    models_added = self.aggregator.get_aggregated_models()
                 attack = get_attack(self.state.addr)
                 trace = getattr(attack, "trace", None)
                 if trace is not None:

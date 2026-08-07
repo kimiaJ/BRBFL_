@@ -197,3 +197,46 @@ def test_models_received_before_final_admission_are_filtered_not_discarded():
     assert set(aggregator.get_aggregated_models()) == {"node-1", "node-2"}
     assert "node-0" not in aggregator.get_expected_aggregation_models()
     assert aggregator.get_missing_models() == set()
+
+
+def test_round_admission_finalization_is_single_idempotent_readiness_transition():
+    """The ledger result removes a rejection once and is immutable thereafter."""
+    aggregator = FedAvg()
+    aggregator.set_addr("node-0")
+    configured = ["node-0", "node-1", "node-2"]
+    admitted = ["node-1", "node-2"]
+    aggregator.set_nodes_to_aggregate(configured, round_id=4)
+    for node in admitted:
+        aggregator.add_model(P2PFLModelMock(None, params=[np.array([1.0])], num_samples=1, contributors=[node]))
+
+    aggregator.finalize_admitted_contributors(4, configured, admitted)
+    # An identical observation is explicitly idempotent for this round.
+    aggregator.finalize_admitted_contributors(4, configured, list(reversed(admitted)))
+
+    assert aggregator.get_expected_aggregation_models() == set(admitted)
+    assert aggregator.get_missing_models() == set()
+    assert set(aggregator.get_aggregated_models()) == set(admitted)
+    with pytest.raises(ValueError, match="contradictory finalized admission"):
+        aggregator.finalize_admitted_contributors(4, configured, ["node-0", "node-1", "node-2"])
+    with pytest.raises(ValueError, match="stale or wrong round"):
+        aggregator.finalize_admitted_contributors(3, configured, admitted)
+    with pytest.raises(ValueError, match="not configured"):
+        fresh = FedAvg()
+        fresh.set_nodes_to_aggregate(configured, round_id=4)
+        fresh.finalize_admitted_contributors(4, configured, ["unknown"])
+    with pytest.raises(ValueError, match="not in the train set"):
+        aggregator.reject_model(["unknown"])
+    with pytest.raises(ValueError, match="not in the train set"):
+        aggregator.reject_model(["node-0"])
+
+
+def test_next_round_restores_configured_contributor_after_prior_rejection():
+    """Round admission changes expected models, never configured eligibility."""
+    aggregator = FedAvg()
+    configured = ["node-0", "node-1", "node-2"]
+    aggregator.set_nodes_to_aggregate(configured, round_id=0)
+    aggregator.finalize_admitted_contributors(0, configured, ["node-1", "node-2"])
+
+    aggregator.set_nodes_to_aggregate(configured, round_id=1)
+
+    assert aggregator.get_expected_aggregation_models() == set(configured)

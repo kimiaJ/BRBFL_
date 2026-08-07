@@ -48,6 +48,8 @@ class Aggregator(NodeComponent):
         self.__train_set: list[str] = []  # TODO: Remove the trainset from the state
         self.__models: list[P2PFLModel] = []
         self.__rejected_contributors: set[str] = set()
+        self.__aggregation_round: int | None = None
+        self.__finalized_admission: tuple[int, tuple[str, ...], tuple[str, ...]] | None = None
 
         # Initialize instance's partial_aggregation based on the class's support
         self.partial_aggregation: bool = self.__class__.SUPPORTS_PARTIAL_AGGREGATION
@@ -87,12 +89,13 @@ class Aggregator(NodeComponent):
         """
         return []
 
-    def set_nodes_to_aggregate(self, nodes_to_aggregate: list[str]) -> None:
+    def set_nodes_to_aggregate(self, nodes_to_aggregate: list[str], round_id: int | None = None) -> None:
         """
         List with the name of nodes to aggregate. Be careful, by setting new nodes, the actual aggregation will be lost.
 
         Args:
             nodes_to_aggregate: List of nodes to aggregate. Empty for no aggregation.
+            round_id: Canonical round owning this aggregation, when admission is enabled.
 
         Raises:
             Exception: If the aggregation is running.
@@ -102,7 +105,17 @@ class Aggregator(NodeComponent):
             raise Exception("It is not possible to set nodes to aggregate when the aggregation is running.")
 
         # Start new aggregation
-        self.__train_set = nodes_to_aggregate
+        canonical_round = None if round_id is None else int(round_id)
+        if self.__finalized_admission is not None and canonical_round is not None:
+            finalized_round = self.__finalized_admission[0]
+            if canonical_round <= finalized_round:
+                raise ValueError(
+                    f"aggregation round must advance after finalized admission: round={canonical_round}, "
+                    f"finalized_round={finalized_round}"
+                )
+        self.__aggregation_round = canonical_round
+        self.__finalized_admission = None
+        self.__train_set = list(nodes_to_aggregate)
         self._finish_aggregation_event.clear()
         for m in self.__unhandled_models:
             self.add_model(m)
@@ -115,6 +128,8 @@ class Aggregator(NodeComponent):
             self.__train_set = []
             self.__models = []
             self.__rejected_contributors = set()
+            self.__aggregation_round = None
+            self.__finalized_admission = None
             self.__unhandled_models = []
             self._finish_aggregation_event.set()
 
@@ -138,6 +153,48 @@ class Aggregator(NodeComponent):
                 self._finish_aggregation_event.set()
             else:
                 self._finish_aggregation_event.clear()
+
+    def finalize_admitted_contributors(
+        self,
+        round_id: int,
+        configured_contributors: list[str],
+        admitted_contributors: list[str],
+    ) -> None:
+        """Apply one immutable, round-scoped admission result to readiness."""
+        canonical_round = int(round_id)
+        configured = tuple(sorted(set(configured_contributors)))
+        admitted = tuple(sorted(set(admitted_contributors)))
+        decision = (canonical_round, configured, admitted)
+        with self.__agg_lock:
+            if self.__aggregation_round != canonical_round:
+                raise ValueError(
+                    f"admission decision is for a stale or wrong round: round={canonical_round}, "
+                    f"aggregation_round={self.__aggregation_round}"
+                )
+            if set(admitted) - set(configured):
+                raise ValueError(f"admitted contributors are not configured: {sorted(set(admitted) - set(configured))}")
+            if self.__finalized_admission is not None:
+                if self.__finalized_admission != decision:
+                    raise ValueError(
+                        f"contradictory finalized admission decision: round={canonical_round}, "
+                        f"previous={self.__finalized_admission[2]}, admitted={admitted}"
+                    )
+                return
+            if set(self.__train_set) != set(configured):
+                raise ValueError(
+                    "configured contributors disagree with the aggregation train set: "
+                    f"configured={list(configured)}, train_set={sorted(self.__train_set)}"
+                )
+            self.__train_set = list(admitted)
+            admitted_set = set(admitted)
+            self.__models = [m for m in self.__models if set(m.get_contributors()) <= admitted_set]
+            self.__rejected_contributors.clear()
+            received = set(self.get_aggregated_models())
+            if received >= admitted_set:
+                self._finish_aggregation_event.set()
+            else:
+                self._finish_aggregation_event.clear()
+            self.__finalized_admission = decision
 
     def get_expected_aggregation_models(self) -> set[str]:
         """Return the canonical contributors currently required for readiness."""
