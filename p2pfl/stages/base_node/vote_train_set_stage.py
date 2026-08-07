@@ -56,11 +56,26 @@ class VoteTrainSetStage(Stage):
             VoteTrainSetStage.__vote(trainset_size, state, communication_protocol, generator)
 
             # Aggregate votes
-            state.train_set = VoteTrainSetStage.__validate_train_set(
-                VoteTrainSetStage.__aggregate_votes(trainset_size, state, communication_protocol),
+            protocol_selected = VoteTrainSetStage.__aggregate_votes(trainset_size, state, communication_protocol)
+            state.train_set = VoteTrainSetStage.validate_train_set(
+                protocol_selected,
                 state,
                 communication_protocol,
             )
+            if state.eligible_trainers is not None and not set(state.train_set) <= set(state.eligible_trainers):
+                raise RuntimeError(
+                    "trainer selection violates configured eligibility: "
+                    f"round={state.round}, selected={sorted(state.train_set)}, "
+                    f"eligible={sorted(state.eligible_trainers)}"
+                )
+            state.trainer_role_evidence[int(state.round)] = {
+                "network_participants": sorted(set(communication_protocol.get_neighbors(only_direct=False)) | {state.addr}),
+                "eligible_trainers": sorted(state.eligible_trainers) if state.eligible_trainers is not None else None,
+                "protocol_selected_trainers": sorted(protocol_selected),
+                "selected_trainers": sorted(state.train_set),
+                "actually_trained": False,
+                "submitted_candidate": False,
+            }
             attack = get_attack(state.addr)
             trace = getattr(attack, "trace", None)
             if trace is not None:
@@ -85,6 +100,8 @@ class VoteTrainSetStage(Stage):
         candidates = list(communication_protocol.get_neighbors(only_direct=False))
         if state.addr not in candidates:
             candidates.append(state.addr)
+        if state.eligible_trainers is not None:
+            candidates = [candidate for candidate in candidates if candidate in state.eligible_trainers]
         logger.debug(state.addr, f"👨‍🏫 {len(candidates)} candidates to train set")
 
         # Order candidates to make a deterministic vote (based on the random seed)
@@ -177,14 +194,16 @@ class VoteTrainSetStage(Stage):
             state.wait_votes_ready_lock.acquire(timeout=2)
 
     @staticmethod
-    def __validate_train_set(
+    def validate_train_set(
         train_set: list[str],
         state: NodeState,
         communication_protocol: CommunicationProtocol,
     ) -> list[str]:
+        """Remove unreachable and policy-ineligible election results."""
         # Verify if node set is valid
         # (can happend that a node was down when the votes were being processed)
-        for tsn in train_set:
-            if tsn not in list(communication_protocol.get_neighbors(only_direct=False)) and (tsn != state.addr):
-                train_set.remove(tsn)
-        return train_set
+        reachable = set(communication_protocol.get_neighbors(only_direct=False)) | {state.addr}
+        validated = [node_id for node_id in train_set if node_id in reachable]
+        if state.eligible_trainers is not None:
+            validated = [node_id for node_id in validated if node_id in state.eligible_trainers]
+        return validated

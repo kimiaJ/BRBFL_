@@ -60,6 +60,10 @@ class NodeState:
         # Train Set
         self.train_set: list[str] = []
         self.train_set_votes: dict[str, dict[str, int]] = {}
+        # Optional experiment policy.  ``None`` preserves the historical
+        # election over every reachable participant.
+        self.eligible_trainers: tuple[str, ...] | None = None
+        self.trainer_role_evidence: dict[int, dict[str, object]] = {}
 
         # Actual experiment
         self.experiment: Experiment | None = None
@@ -76,6 +80,20 @@ class NodeState:
         self.model_initialized_lock.acquire()
         self.aggregated_model_event = threading.Event()
         self.aggregated_model_event.set()
+
+    def set_eligible_trainers(self, node_ids: list[str] | tuple[str, ...] | None) -> None:
+        """Install a stable, canonical trainer allowlist before learning starts."""
+        if self.round is not None:
+            raise RuntimeError("trainer eligibility cannot change while learning is active")
+        if node_ids is None:
+            self.eligible_trainers = None
+            return
+        canonical = tuple(node_ids)
+        if any(not isinstance(node_id, str) or not node_id for node_id in canonical):
+            raise ValueError("eligible trainer IDs must be non-empty canonical strings")
+        if len(set(canonical)) != len(canonical):
+            raise ValueError("eligible trainer IDs must be unique")
+        self.eligible_trainers = canonical
 
     @property
     def round(self) -> int | None:
@@ -151,7 +169,11 @@ class NodeState:
 
     def clear(self) -> None:
         """Clear the state."""
+        eligible_trainers = self.eligible_trainers
+        trainer_role_evidence = self.trainer_role_evidence
         type(self).__init__(self, self.addr)
+        self.eligible_trainers = eligible_trainers
+        self.trainer_role_evidence = trainer_role_evidence
 
     def __str__(self) -> str:
         """Return a String representation of the node state."""

@@ -11,6 +11,16 @@ audits observed aggregation but did not control admission. Validators and
 contributors execute as node threads in the same experiment process for the
 memory smoke configuration (Ray may still be used by learners).
 
+The smoke manifests set the generic `eligible_trainers` policy to the
+configured contributors. `VoteTrainSetStage` intersects its normal reachable
+candidate pool with that allowlist before nominations are sampled; with a
+train-set size of five and three eligible nodes, every node selects exactly
+`node-0`, `node-1`, and `node-2`. Without the optional policy, the historical
+all-neighbor election is unchanged. `TrainStage` independently fails before
+`learner.fit()` if corrupt state routes a selected ineligible node into
+training. Validator-only nodes stay connected and follow the non-trainer
+workflow.
+
 `ValidatorSubgroupGate` is the new reusable admission boundary at both real
 call sites. It snapshots the submitted parameters, calculates each reference
 decision, publishes votes, and returns the admission result. An accepted model

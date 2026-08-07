@@ -58,6 +58,15 @@ class TrainStage(Stage):
             trace = getattr(attack, "trace", lambda *args, **fields: None)
             check_early_stop(state)
 
+            if state.addr not in state.train_set:
+                raise RuntimeError(f"TrainStage entered by unselected node: round={state.round}, node={state.addr}")
+            if state.eligible_trainers is not None and state.addr not in state.eligible_trainers:
+                raise RuntimeError(
+                    "selected trainer is not eligible; refusing to train before learner.fit(): "
+                    f"round={state.round}, node={state.addr}, selected={sorted(state.train_set)}, "
+                    f"eligible={sorted(state.eligible_trainers)}"
+                )
+
             # Set Models To Aggregate
             aggregator.set_nodes_to_aggregate(state.train_set)
 
@@ -92,6 +101,7 @@ class TrainStage(Stage):
             if training_complete is not None:
                 training_complete(learner.get_model().get_parameters(), skip_training)
             logger.info(state.addr, "🎓 Training done.")
+            state.trainer_role_evidence[int(state.round)]["actually_trained"] = True
             trace("local_training_completed")
             # Lifecycle attacks are owned by the node process.  A fitted model may
             # have made a Ray round trip, so do not make the canonical audit
@@ -144,6 +154,7 @@ class TrainStage(Stage):
                 models_added = aggregator.add_model(learner.get_model())
             else:
                 models_added = aggregator.reject_model([state.addr])
+            state.trainer_role_evidence[int(state.round)]["submitted_candidate"] = True
 
             # send model added msg ---->> redundant (a node always owns its model)
             # TODO: print("Broadcast redundante")

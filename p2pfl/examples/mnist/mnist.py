@@ -410,6 +410,7 @@ def mnist(
             model_to_use.node_addr = node.addr
             model_to_use.model.node_addr = node.addr
             node.start()
+            node.set_eligible_trainers(config.eligible_trainers)
             if attack_obj is not None:
                 register_attack(node.addr, attack_obj)
                 attack_obj.on_attach(node)
@@ -514,11 +515,36 @@ def mnist(
                             "global_model_after_aggregation_sha256" if free_rider_validation else "installed_global_model_sha256"
                         ],
                     }
-                    if free_rider_validation or collusion_validation or validator_gate is not None
+                    if free_rider_validation or collusion_validation
                     else {}
                 ),
                 "per_node_metrics": per_node_metrics,
             }
+            if validator_gate is not None:
+                role_rows = {node.addr: node.state.trainer_role_evidence[round_number] for node in nodes}
+                selected_sets = {tuple(row["selected_trainers"]) for row in role_rows.values()}
+                if len(selected_sets) != 1:
+                    raise RuntimeError(f"nodes disagree on selected trainers: round={round_number}, evidence={role_rows}")
+                actual_training = sorted(node_id for node_id, row in role_rows.items() if row["actually_trained"])
+                submitted = sorted(node_id for node_id, row in role_rows.items() if row["submitted_candidate"])
+                configured = sorted(config.validation.contributors)
+                if actual_training != configured or submitted != configured:
+                    raise RuntimeError(
+                        f"contributor role invariant failed: round={round_number}, trained={actual_training}, "
+                        f"submitted={submitted}, configured={configured}"
+                    )
+                evidence["trainer_roles"] = {
+                    "all_network_nodes": sorted(participating),
+                    "configured_contributors": configured,
+                    "configured_validators": sorted(config.validation.validators),
+                    "validator_only_nodes": sorted(set(config.validation.validators) - set(config.validation.contributors)),
+                    "byzantine_validators": sorted(set(configured_malicious) & set(config.validation.validators)),
+                    "eligible_trainers": sorted(config.eligible_trainers or ()),
+                    "selected_trainers": list(next(iter(selected_sets))),
+                    "per_node_selection": role_rows,
+                    "actual_training_nodes": actual_training,
+                    "submitted_candidates": submitted,
+                }
             if free_rider_validation:
                 evidence["attack_application_counts"] = {
                     node_id: audit.evidence_for_round(round_number)["free_rider_attack_application_count"]
@@ -589,6 +615,7 @@ def mnist(
                     "aggregator": config.aggregator,
                     "topology": config.topology.value,
                     "batch_size": config.batch_size,
+                    "eligible_trainers": list(config.eligible_trainers) if config.eligible_trainers is not None else None,
                     "dataset": {
                         "name": config.dataset.name,
                         "distribution": config.dataset.distribution,

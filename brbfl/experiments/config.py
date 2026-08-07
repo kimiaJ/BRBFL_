@@ -71,6 +71,7 @@ class ExperimentConfig:
     measure_time: bool = False
     save_csv: bool = True
     output_dir: str = "results/mnist"
+    eligible_trainers: tuple[str, ...] | None = None
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
     attack: AttackConfig = field(default_factory=AttackConfig)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
@@ -124,6 +125,7 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         measure_time=raw.get("measure_time", ExperimentConfig.measure_time),
         save_csv=raw.get("save_csv", ExperimentConfig.save_csv),
         output_dir=raw.get("output_dir", ExperimentConfig.output_dir),
+        eligible_trainers=(tuple(raw["eligible_trainers"]) if raw.get("eligible_trainers") is not None else None),
         dataset=dataset,
         attack=attack,
         validation=validation,

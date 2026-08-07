@@ -1,11 +1,16 @@
 """Focused tests for the real validator-subgroup admission decision."""
 # ruff: noqa: D103
 
+from unittest.mock import Mock
+
 import numpy as np
 import pytest
 
 from brbfl.experiments.config import load_experiment_config
 from brbfl.validation import AdmissionPolicy, ValidatorSubgroupGate, canonical_parameters, parameter_hash
+from p2pfl.node_state import NodeState
+from p2pfl.stages.base_node.train_stage import TrainStage
+from p2pfl.stages.base_node.vote_train_set_stage import VoteTrainSetStage
 
 
 def _gate(byzantine=()):
@@ -29,6 +34,57 @@ def test_controlled_configs_match_except_attack_and_output():
     assert clean.validation.contributors == ("node-0", "node-1", "node-2")
     assert clean.validation.validators == ("node-0", "node-3", "node-4")
     assert attacked.attack.adversaries == (3, 4)
+    assert clean.eligible_trainers == attacked.eligible_trainers == ("node-0", "node-1", "node-2")
+    assert set(clean.validation.validators) - set(clean.validation.contributors) == {"node-3", "node-4"}
+
+
+class _SingleNodeProtocol:
+    def get_neighbors(self, only_direct=False):
+        return []
+
+    def build_msg(self, *args, **kwargs):
+        return (args, kwargs)
+
+    def broadcast(self, message):
+        return None
+
+
+def test_workflow_election_allowlist_and_pre_fit_role_invariant():
+    """Reach the real election and prove a policy violation fails before fit."""
+    state = NodeState("node-0")
+    state.set_eligible_trainers(("node-0", "node-1", "node-2"))
+    state.set_experiment("role-test", 1)
+    protocol = _SingleNodeProtocol()
+    next_stage = VoteTrainSetStage.execute(
+        trainset_size=5,
+        state=state,
+        communication_protocol=protocol,
+        generator=__import__("random").Random(666),
+    )
+    assert next_stage is TrainStage
+    assert state.train_set == ["node-0"]
+    assert state.trainer_role_evidence[0]["eligible_trainers"] == ["node-0", "node-1", "node-2"]
+
+    learner = Mock()
+    state.eligible_trainers = ("node-1", "node-2")  # simulate corrupt selection/config state
+    with pytest.raises(RuntimeError, match=r"refusing to train before learner\.fit"):
+        TrainStage.execute(state=state, communication_protocol=protocol, learner=learner, aggregator=Mock())
+    learner.fit.assert_not_called()
+
+
+def test_default_election_remains_unrestricted_and_gate_remains_strict():
+    state = NodeState("node-4")
+    state.set_experiment("default-role-test", 1)
+    next_stage = VoteTrainSetStage.execute(
+        trainset_size=5,
+        state=state,
+        communication_protocol=_SingleNodeProtocol(),
+        generator=__import__("random").Random(666),
+    )
+    assert next_stage is TrainStage
+    assert state.eligible_trainers is None
+    with pytest.raises(RuntimeError, match="candidate is not an eligible contributor"):
+        _gate().submit_and_decide(0, "node-4", [np.array([1.0])])
 
 
 def test_byzantine_votes_change_admission_without_mutating_candidate():

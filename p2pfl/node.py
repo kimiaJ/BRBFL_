@@ -332,6 +332,10 @@ class Node:
         """
         return self.learner.get_data()
 
+    def set_eligible_trainers(self, node_ids: list[str] | tuple[str, ...] | None) -> None:
+        """Constrain trainer election without removing nodes from the network."""
+        self.state.set_eligible_trainers(node_ids)
+
     ###############################################
     #         Network Learning Management         #
     ###############################################
@@ -367,7 +371,7 @@ class Node:
         if self.state.round is None:
             # Broadcast start Learning
             logger.info(self.addr, "🚀 Broadcasting start learning...")
-            
+
             experiment_name = f"{experiment_name}-{time.time()}"
             self._communication_protocol.broadcast(
                 self._communication_protocol.build_msg(
