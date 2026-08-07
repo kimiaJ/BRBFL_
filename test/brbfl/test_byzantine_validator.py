@@ -214,10 +214,25 @@ def _comparison_fixture():
         "validation": {"contributors": contributors, "validators": validators, "quorum": 3, "acceptance_threshold": 2},
     }
     roles = {
+        "all_network_nodes": [f"node-{index}" for index in range(5)],
         "configured_contributors": contributors,
         "configured_validators": validators,
+        "validator_only_nodes": ["node-3", "node-4"],
         "actual_training_nodes": contributors,
         "eligible_trainers": contributors,
+        "selected_trainers": contributors,
+        "submitted_candidates": contributors,
+        "per_node_selection": {
+            f"node-{index}": {
+                "network_participants": [f"node-{participant}" for participant in range(5)],
+                "eligible_trainers": contributors,
+                "protocol_selected_trainers": contributors,
+                "selected_trainers": contributors,
+                "actually_trained": index < 3,
+                "submitted_candidate": index < 3,
+            }
+            for index in range(5)
+        },
     }
 
     def vote(candidate, validator, reference, attacked):
@@ -266,7 +281,10 @@ def _comparison_fixture():
             rounds.append(
                 {
                     "round": round_number,
-                    "trainer_roles": dict(roles, byzantine_validators=["node-3", "node-4"] if attacked else []),
+                    "trainer_roles": dict(
+                        deepcopy(roles),
+                        byzantine_validators=["node-3", "node-4"] if attacked else [],
+                    ),
                     "aggregation_lineage": {
                         "contributors": admitted,
                         "input_hashes": inputs,
@@ -339,6 +357,64 @@ def test_causal_comparator_accepts_real_round_one_node_zero_shape():
     }
     assert result["first_downstream_candidate_difference"]["candidate_node_id"] == "node-0"
     assert result["first_downstream_candidate_difference"]["expected_downstream_effect"] is True
+    assert result["causal_status"] == "proven_byzantine_vote_inversion_changed_model_path"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("selected_trainers", ["node-0"]),
+        ("actual_training_nodes", ["node-0"]),
+        ("submitted_candidates", ["node-0"]),
+        ("configured_contributors", ["node-0"]),
+        ("configured_validators", ["node-0"]),
+        ("validator_only_nodes", ["node-4"]),
+    ],
+)
+def test_causal_comparator_rejects_changed_controlled_trainer_roles(field, value):
+    from brbfl.experiments.compare_byzantine_validator import compare_evidence
+
+    clean, attacked = _comparison_fixture()
+    attacked["rounds"][0]["trainer_roles"][field] = value
+    with pytest.raises(AssertionError, match="controlled trainer_roles differ: round=0"):
+        compare_evidence(clean, attacked)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("actually_trained", False),
+        ("selected_trainers", ["node-0"]),
+        ("protocol_selected_trainers", ["node-0"]),
+        ("submitted_candidate", False),
+        ("eligible_trainers", ["node-0"]),
+        ("network_participants", ["node-0"]),
+    ],
+)
+def test_causal_comparator_rejects_changed_controlled_per_node_selection(field, value):
+    from brbfl.experiments.compare_byzantine_validator import compare_evidence
+
+    clean, attacked = _comparison_fixture()
+    attacked["rounds"][0]["trainer_roles"]["per_node_selection"]["node-0"][field] = value
+    with pytest.raises(AssertionError, match="controlled trainer_roles differ: round=0"):
+        compare_evidence(clean, attacked)
+
+
+def test_causal_comparator_allows_intervention_and_downstream_trainer_role_fields():
+    from brbfl.experiments.compare_byzantine_validator import compare_evidence
+
+    clean, attacked = _comparison_fixture()
+    for round_number in range(2):
+        clean_roles = clean["rounds"][round_number]["trainer_roles"]
+        attacked_roles = attacked["rounds"][round_number]["trainer_roles"]
+        assert clean_roles["byzantine_validators"] == []
+        assert attacked_roles["byzantine_validators"] == ["node-3", "node-4"]
+        for node_id in clean_roles["per_node_selection"]:
+            clean_roles["per_node_selection"][node_id]["expected_aggregation_models"] = ["node-1", "node-2"]
+            attacked_roles["per_node_selection"][node_id]["expected_aggregation_models"] = ["node-0"]
+
+    result = compare_evidence(clean, attacked)
+    assert result["causal_status"] == "proven_byzantine_vote_inversion_changed_model_path"
 
 
 @pytest.mark.parametrize(

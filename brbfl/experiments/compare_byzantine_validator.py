@@ -24,6 +24,29 @@ CONTROLLED_FIELDS = (
     "validation",
 )
 
+# ``trainer_roles`` is intentionally a mixed evidence object.  Keep this
+# allowlist limited to facts fixed before the validator intervention; admission
+# and installation evidence is checked later through candidate and lineage
+# assertions.
+CONTROLLED_TRAINER_ROLE_FIELDS = (
+    "all_network_nodes",
+    "configured_contributors",
+    "configured_validators",
+    "validator_only_nodes",
+    "eligible_trainers",
+    "selected_trainers",
+    "actual_training_nodes",
+    "submitted_candidates",
+)
+CONTROLLED_PER_NODE_SELECTION_FIELDS = (
+    "actually_trained",
+    "selected_trainers",
+    "protocol_selected_trainers",
+    "submitted_candidate",
+    "eligible_trainers",
+    "network_participants",
+)
+
 
 def _fail(message: str, key: tuple[int, str] | None = None) -> None:
     suffix = f": {key}" if key else ""
@@ -45,6 +68,20 @@ def _candidate_map(evidence: dict[str, Any]) -> dict[tuple[int, str], dict[str, 
 
 def _round_map(evidence: dict[str, Any]) -> dict[int, dict[str, Any]]:
     return {row["round"]: row for row in evidence["rounds"]}
+
+
+def _controlled_trainer_roles(round_row: dict[str, Any], round_number: int) -> dict[str, Any]:
+    """Extract only pre-intervention trainer role and election evidence."""
+    try:
+        roles = round_row["trainer_roles"]
+        controlled = {field: roles[field] for field in CONTROLLED_TRAINER_ROLE_FIELDS}
+        per_node = roles["per_node_selection"]
+        controlled["per_node_selection"] = {
+            node_id: {field: selection[field] for field in CONTROLLED_PER_NODE_SELECTION_FIELDS} for node_id, selection in per_node.items()
+        }
+        return controlled
+    except (KeyError, AttributeError) as exc:
+        raise AssertionError(f"round {round_number} lacks controlled trainer-role evidence") from exc
 
 
 def _lineage(round_row: dict[str, Any], round_number: int) -> dict[str, Any]:
@@ -157,10 +194,8 @@ def compare_evidence(clean: dict[str, Any], attacked: dict[str, Any]) -> dict[st
     if clean_rounds.keys() != attack_rounds.keys():
         raise AssertionError("completed round identities differ")
     for round_number in clean_rounds:
-        clean_roles = dict(clean_rounds[round_number].get("trainer_roles", {}))
-        attack_roles = dict(attack_rounds[round_number].get("trainer_roles", {}))
-        clean_roles.pop("byzantine_validators", None)
-        attack_roles.pop("byzantine_validators", None)
+        clean_roles = _controlled_trainer_roles(clean_rounds[round_number], round_number)
+        attack_roles = _controlled_trainer_roles(attack_rounds[round_number], round_number)
         if clean_roles != attack_roles:
             raise AssertionError(f"controlled trainer_roles differ: round={round_number}")
 
