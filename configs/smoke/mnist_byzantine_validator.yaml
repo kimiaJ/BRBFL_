@@ -11,6 +11,7 @@ show_metrics: false
 measure_time: false
 save_csv: true
 output_dir: results/byzantine-validator-validation/attacked
+eligible_trainers: [node-0, node-1, node-2]
 dataset: {name: p2pfl/MNIST, distribution: iid, reduced: true, partition_multiplier: 50}
 validation:
   enabled: true
