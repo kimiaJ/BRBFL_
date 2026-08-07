@@ -5,8 +5,10 @@
 import copy
 
 import numpy as np
+import pytest
 import torch
-from datasets import Dataset, DatasetDict
+from datasets import Dataset, DatasetDict, Features, Image, Value, load_from_disk
+from PIL import Image as PILImage
 
 from brbfl.attacks.backdoor import BackdoorAttack
 from brbfl.evaluation.metrics import MNISTTrigger, apply_mnist_trigger, triggered_asr_counts
@@ -22,6 +24,45 @@ def partition(size: int = 10) -> P2PFLDataset:
             {"train": Dataset.from_dict({"image": images, "label": labels}), "test": Dataset.from_dict({"image": images, "label": labels})}
         )
     )
+
+
+@pytest.mark.parametrize("reconstruct", [False, True])
+def test_image_feature_poisoning_preserves_schema_and_source(tmp_path, reconstruct):
+    images = [PILImage.fromarray(np.full((28, 28), index, dtype=np.uint8)) for index in range(10)]
+    labels = list(range(10))
+    features = Features({"image": Image(), "label": Value("int64")})
+    train = Dataset.from_dict({"image": images, "label": labels}, features=features)
+    if reconstruct:
+        cache_path = tmp_path / "mnist"
+        train.save_to_disk(cache_path)
+        train = load_from_disk(cache_path)
+    source = P2PFLDataset(DatasetDict({"train": train, "test": train}))
+    before_images = [np.asarray(row["image"], dtype=np.uint8).copy() for row in train]
+    before_labels = list(train["label"])
+
+    attack = BackdoorAttack(poison_rate=0.3, target_class=2, trigger_value=255, seed=12)
+    poisoned_train = attack.poison_data(source)._data["train"]
+    selected = set(attack.poisoning_evidence["changed_image_indices"])
+
+    assert isinstance(train.features["image"], Image)
+    assert isinstance(poisoned_train.features["image"], Image)
+    assert len(selected) == 3
+    for index, row in enumerate(poisoned_train):
+        assert isinstance(row["image"], PILImage.Image)
+        assert row["image"].mode == "L"
+        pixels = np.asarray(row["image"])
+        assert pixels.dtype == np.uint8
+        assert pixels.shape == (28, 28)
+        if index in selected:
+            assert np.all(pixels[25:28, 25:28] == 255)
+            assert row["label"] == 2
+        else:
+            np.testing.assert_array_equal(pixels, before_images[index])
+            assert row["label"] == before_labels[index]
+
+    for index, row in enumerate(train):
+        np.testing.assert_array_equal(np.asarray(row["image"]), before_images[index])
+        assert row["label"] == before_labels[index]
 
 
 def test_deterministic_trigger_placement_and_normalization():
