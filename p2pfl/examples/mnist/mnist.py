@@ -36,7 +36,7 @@ import pandas as pd
 
 from brbfl.attacks import clear_attacks, create_attack, prepare_dataset, register_attack
 from brbfl.attacks.poisoned_model import PoisonedLightningModel
-from brbfl.experiments.attack_evidence import audit_partition, labels, parameter_hash, write_evidence
+from brbfl.experiments.attack_evidence import audit_partition, labels, parameter_hash, snapshot_partition, write_evidence
 from brbfl.experiments.config import AttackConfig, DatasetConfig, ExperimentConfig, load_experiment_config
 from brbfl.experiments.config import TopologyType as ConfigTopologyType
 from brbfl.experiments.datasets import partition_dataset
@@ -311,7 +311,7 @@ def mnist(
     data = P2PFLDataset.from_huggingface(config.dataset.name)
     source_labels_before = labels(data)
     partitions = partition_dataset(data, config)
-    original_labels = [labels(partition) for partition in partitions[:n]]
+    original_partitions = [snapshot_partition(partition) for partition in partitions[:n]]
 
     nodes = []
     adversary_indices = list(config.attack.adversaries)
@@ -321,53 +321,52 @@ def mnist(
     partition_audits = []
     model_update_audits = {}
     evaluation_attack = create_attack("backdoor", attack_params) if "target_class" in attack_params else None
-    for i in range(n):
-        if config.protocol == "memory":
-            address = f"node-{i}"
-        elif config.protocol == "unix":
-            address = f"unix:///tmp/p2pfl-{i}.sock"
-        else:
-            address = "127.0.0.1"
-        attack_obj = None
-        original_model = model_fn()
-        if evaluation_attack is not None:
-            original_model.model.backdoor_evaluation_attack = evaluation_attack
-        if i in adversary_indices and attack_name != "none":
-            attack_obj = create_attack(attack_name, attack_params)
-            partitions[i] = prepare_dataset(partitions[i], attack_obj)
-            if attack_name == "sign_flipping":
-                attack_obj = AuditedModelUpdateAttack(attack_obj, list(original_model.model.state_dict()))
-                model_update_audits[f"node-{i}"] = attack_obj
-
-        partition_audit = audit_partition(
-            i,
-            original_labels[i],
-            labels(partitions[i]),
-            attack_params.get("flip_map", {}),
-            attack_obj is not None and attack_name == "label_flipping",
-        )
-        if attack_name == "backdoor" and attack_obj is not None:
-            partition_audit = {"node_id": f"node-{i}", "malicious": True, **attack_obj.poisoning_evidence}
-        partition_audits.append(partition_audit)
-
-        model_to_use = PoisonedLightningModel(original_model.model, node_addr=address)
-        node = Node(
-            model_to_use,
-            partitions[i],
-            protocol=MemoryCommunicationProtocol() if config.protocol == "memory" else GrpcCommunicationProtocol(),
-            addr=address,
-            aggregator=Scaffold() if config.aggregator == "scaffold" else None,
-        )
-        node.start()
-        if attack_obj:
-            register_attack(address, attack_obj)
-            attack_obj.on_attach(node)
-        logger.info(node.addr, f"node: {i}")
-        node_attack = attack_name if i in adversary_indices else "N/A"
-        logger.info(node.addr, f"Node {i} | Adversary: {i in adversary_indices} | Attack: {node_attack}")
-        nodes.append(node)
-
     try:
+        for i in range(n):
+            if config.protocol == "memory":
+                address = f"node-{i}"
+            elif config.protocol == "unix":
+                address = f"unix:///tmp/p2pfl-{i}.sock"
+            else:
+                address = "127.0.0.1"
+            attack_obj = None
+            original_model = model_fn()
+            if evaluation_attack is not None:
+                original_model.model.backdoor_evaluation_attack = evaluation_attack
+            if i in adversary_indices and attack_name != "none":
+                attack_obj = create_attack(attack_name, attack_params)
+                partitions[i] = prepare_dataset(partitions[i], attack_obj)
+                if attack_name == "sign_flipping":
+                    attack_obj = AuditedModelUpdateAttack(attack_obj, list(original_model.model.state_dict()))
+                    model_update_audits[f"node-{i}"] = attack_obj
+
+            partition_audit = audit_partition(
+                node_id=i,
+                attack_type=attack_name,
+                before=original_partitions[i],
+                after=partitions[i],
+                malicious=attack_obj is not None,
+                attack=attack_obj,
+            )
+            partition_audits.append(partition_audit)
+
+            model_to_use = PoisonedLightningModel(original_model.model, node_addr=address)
+            node = Node(
+                model_to_use,
+                partitions[i],
+                protocol=MemoryCommunicationProtocol() if config.protocol == "memory" else GrpcCommunicationProtocol(),
+                addr=address,
+                aggregator=Scaffold() if config.aggregator == "scaffold" else None,
+            )
+            node.start()
+            if attack_obj:
+                register_attack(address, attack_obj)
+                attack_obj.on_attach(node)
+            logger.info(node.addr, f"node: {i}")
+            node_attack = attack_name if i in adversary_indices else "N/A"
+            logger.info(node.addr, f"Node {i} | Adversary: {i in adversary_indices} | Attack: {node_attack}")
+            nodes.append(node)
+
         adjacency_matrix = TopologyFactory.generate_matrix(topology.value, len(nodes))
         TopologyFactory.connect_nodes(adjacency_matrix, nodes)
         print(f"Waiting for {n} nodes to connect (this may take 1-2 minutes)...")
@@ -556,6 +555,7 @@ def mnist(
     finally:
         for node in nodes:
             node.stop()
+        clear_attacks()
         if config.measure_time and start_time is not None:
             print("--- %s seconds ---" % (time.time() - start_time))
         if config.save_csv:
