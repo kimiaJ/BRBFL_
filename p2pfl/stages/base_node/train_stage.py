@@ -115,7 +115,16 @@ class TrainStage(Stage):
             aggregation_observer = getattr(attack, "observe_aggregation", None)
             if aggregation_observer is not None:
                 aggregation_observer(learner.get_model().get_parameters())
-            models_added = aggregator.add_model(learner.get_model())
+            from brbfl.validation import get_validator_gate
+
+            gate = get_validator_gate()
+            admitted = gate is None or gate.submit_and_decide(state.round, state.addr, learner.get_model().get_parameters())
+            if admitted:
+                if gate is not None:
+                    gate.observe_aggregation_input(state.round, state.addr, learner.get_model().get_parameters())
+                models_added = aggregator.add_model(learner.get_model())
+            else:
+                models_added = aggregator.reject_model([state.addr])
 
             # send model added msg ---->> redundant (a node always owns its model)
             # TODO: print("Broadcast redundante")

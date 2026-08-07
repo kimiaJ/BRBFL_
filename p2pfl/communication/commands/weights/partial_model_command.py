@@ -86,7 +86,17 @@ class PartialModelCommand(Command):
             try:
                 # Add model to aggregator
                 model = self.laerner.get_model().build_copy(params=weights, num_samples=num_samples, contributors=list(contributors))
-                models_added = self.aggregator.add_model(model)
+                from brbfl.validation import get_validator_gate
+
+                gate = get_validator_gate()
+                individual = len(contributors) == 1
+                admitted = not individual or gate is None or gate.submit_and_decide(round, contributors[0], model.get_parameters())
+                if admitted:
+                    if gate is not None and individual:
+                        gate.observe_aggregation_input(round, contributors[0], model.get_parameters())
+                    models_added = self.aggregator.add_model(model)
+                else:
+                    models_added = self.aggregator.reject_model(list(contributors))
                 attack = get_attack(self.state.addr)
                 trace = getattr(attack, "trace", None)
                 if trace is not None:
