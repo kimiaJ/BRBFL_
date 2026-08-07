@@ -59,6 +59,14 @@ class PoisonedLightningModel(LightningModel):
         super().set_parameters(detached)
         return [value.copy() for value in detached]
 
+    def reset_optimizer_step_count(self) -> None:
+        """Reset the counter that travels with actor-backed fitted models."""
+        self.model._brbfl_optimizer_step_count = 0
+
+    def optimizer_step_count(self) -> int:
+        """Return the observed optimizer steps from local or actor-backed fit."""
+        return int(getattr(self.model, "_brbfl_optimizer_step_count", 0))
+
     def build_copy(self, **kwargs):
         """
         Preserve the attack registry key when aggregation replaces the model.

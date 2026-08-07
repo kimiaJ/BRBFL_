@@ -353,6 +353,7 @@ def mnist(
                     configured_epochs=e,
                     configured_batch_count=math.ceil(partitions[i].get_num_samples() / config.batch_size),
                 )
+                attack_obj.node_id = f"node-{i}"
                 training_audits[f"node-{i}"] = attack_obj
 
             partition_audit = audit_partition(
@@ -374,7 +375,7 @@ def mnist(
                 aggregator=Scaffold() if config.aggregator == "scaffold" else None,
             )
             node.start()
-            if attack_obj:
+            if attack_obj is not None:
                 register_attack(address, attack_obj)
                 attack_obj.on_attach(node)
             logger.info(node.addr, f"node: {i}")

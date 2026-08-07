@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from brbfl.attacks.free_rider import FreeRiderAttack
-from brbfl.attacks.registry import create_attack
+from brbfl.attacks.registry import clear_attacks, create_attack, get_attack, register_attack
 from brbfl.experiments.config import load_experiment_config
 from brbfl.experiments.free_rider_evidence import TrainingLifecycleAudit, parameter_delta
 
@@ -48,9 +48,71 @@ def test_benign_audit_counts_training_without_attack_application():
     assert not audit.should_skip_local_training()
     audit.record_optimizer_step()
     audit.complete_local_training(values, skipped=False)
-    audit.publish_update(values)
+    submitted = audit.publish_update(values)
+    audit.observe_aggregation(submitted)
+    audit.observe_global_model(submitted)
     assert audit.evidence_for_round(0)["optimizer_step_count"] == 1
     assert audit.evidence_for_round(0)["free_rider_attack_application_count"] == 0
+
+
+def test_round_keys_are_integer_and_evidence_requires_finalization():
+    """Use one key representation and reject incomplete or absent evidence clearly."""
+    audit = TrainingLifecycleAudit(None, configured_epochs=1)
+    audit.node_id = "node-2"
+    with pytest.raises(RuntimeError, match=r"node=node-2.*available_round_keys=\[\].*initialized=False"):
+        audit.evidence_for_round("0")
+
+    values = [np.array([1.0])]
+    audit.begin_local_training("0", values)
+    assert list(audit.rounds) == [0]
+    with pytest.raises(RuntimeError, match=r"initialized=True, finalized=False"):
+        audit.evidence_for_round(0)
+    with pytest.raises(RuntimeError, match="already initialized"):
+        audit.begin_local_training(0, values)
+
+    assert not audit.should_skip_local_training()
+    audit.record_optimizer_steps(1)
+    audit.complete_local_training(values, skipped=False)
+    submitted = audit.publish_update(values)
+    audit.observe_aggregation(submitted)
+    audit.observe_global_model(submitted)
+    assert audit.evidence_for_round("0")["record_finalized"]
+    with pytest.raises(RuntimeError, match="already finalized"):
+        audit.observe_global_model(submitted)
+
+
+def test_all_clean_nodes_finalize_two_rounds_without_fabricating_absence():
+    """Exercise the paired clean run's three-node, two-round lifecycle."""
+    audits = [TrainingLifecycleAudit(None, 1, 1) for _ in range(3)]
+    for node_index, audit in enumerate(audits):
+        audit.node_id = f"node-{node_index}"
+        for round_id in range(2):
+            before = [np.array([float(round_id)])]
+            after = [np.array([float(round_id + 1)])]
+            audit.begin_local_training(round_id, before)
+            assert not audit.should_skip_local_training()
+            audit.record_optimizer_steps(1)
+            audit.complete_local_training(after, skipped=False)
+            submitted = audit.publish_update(after)
+            audit.observe_aggregation(submitted)
+            audit.observe_global_model(submitted)
+
+    assert all(set(audit.rounds) == {0, 1} for audit in audits)
+    assert all(audit.evidence_for_round(r)["optimizer_step_count"] == 1 for audit in audits for r in range(2))
+
+    absent = TrainingLifecycleAudit(None, 1, 1)
+    with pytest.raises(RuntimeError, match="initialized=False"):
+        absent.evidence_for_round(0)
+
+
+def test_falsey_clean_audit_is_the_same_instance_used_by_training_stage_registry():
+    """Guard the clean-path registration condition that caused missing round zero."""
+    clear_attacks()
+    audit = TrainingLifecycleAudit(None, 1, 1)
+    assert not audit
+    register_attack("node-0", audit)
+    assert get_attack("node-0") is audit
+    clear_attacks()
 
 
 def test_zero_delta_tolerance_behavior():

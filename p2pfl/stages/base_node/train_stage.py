@@ -75,6 +75,9 @@ class TrainStage(Stage):
             training_begin = getattr(attack, "begin_local_training", None)
             if training_begin is not None:
                 training_begin(state.round, learner.get_model().get_parameters())
+            counter_reset = getattr(learner.get_model(), "reset_optimizer_step_count", None)
+            if counter_reset is not None:
+                counter_reset()
             skip_training = bool(getattr(attack, "should_skip_local_training", lambda: False)())
             if not skip_training:
                 learner.fit()
@@ -82,6 +85,9 @@ class TrainStage(Stage):
                 # A skipped fit must still set normal contribution metadata so
                 # FedAvg treats this node exactly like every other participant.
                 learner.get_model().set_contribution([state.addr], learner.get_data().get_num_samples())
+            step_recorder = getattr(attack, "record_optimizer_steps", None)
+            if step_recorder is not None:
+                step_recorder(getattr(learner.get_model(), "optimizer_step_count", lambda: 0)())
             training_complete = getattr(attack, "complete_local_training", None)
             if training_complete is not None:
                 training_complete(learner.get_model().get_parameters(), skip_training)
