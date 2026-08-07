@@ -62,6 +62,16 @@ class GossipModelStage(Stage):
         fixed_round = state.round
         if fixed_round is None:
             raise Exception("Learner not initialized")
+        receipt = learner.get_model().additional_info.get("canonical_round_result", {})
+        state.record_aggregate_lifecycle(
+            fixed_round,
+            "gossip_started",
+            aggregate_origin=receipt.get("origin"),
+            contributors=receipt.get("contributors"),
+            receipt_key=(f"add_model:{fixed_round}:{receipt.get('origin')}:{receipt.get('global_model_sha256')}" if receipt else None),
+            expected_aggregate_hash=receipt.get("global_model_sha256"),
+            intended_recipients=sorted(communication_protocol.get_neighbors(only_direct=False)),
+        )
 
         def candidate_condition(node: str) -> bool:
             return state.nei_status[node] < fixed_round
@@ -80,7 +90,11 @@ class GossipModelStage(Stage):
                 communication_protocol.build_weights(FullModelCommand.get_name(), state.round, encoded_model),
                 FullModelCommand.get_name(),
                 state.round,
-                [str(state.round)],
+                [
+                    f"aggregate:{state.round}:{receipt.get('origin')}:{receipt.get('global_model_sha256')}"
+                    if receipt
+                    else f"aggregate:{state.round}"
+                ],
             )
 
         # Gossip

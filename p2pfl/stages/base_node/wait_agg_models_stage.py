@@ -17,6 +17,8 @@
 #
 """Wait aggregated models stage."""
 
+import time
+
 from p2pfl.communication.commands.message.models_ready_command import ModelsReadyCommand
 from p2pfl.communication.protocols.communication_protocol import CommunicationProtocol
 from p2pfl.management.logger import logger
@@ -41,18 +43,39 @@ class WaitAggregatedModelsStage(Stage):
         """Execute the stage."""
         if state is None or communication_protocol is None:
             raise Exception("Invalid parameters on WaitAggregatedModelsStage.")
+        round_number = int(state.round)
+        state.record_aggregate_lifecycle(
+            round_number,
+            "installation_wait_started",
+            aggregate_event=state.aggregated_model_event.is_set(),
+            installed_record=round_number in state.installed_model_hashes,
+        )
         logger.info(state.addr, "⏳ Waiting aggregation.")
-        # Wait for aggregation to finish, if time over timeout log a warning message
-        event_set = state.aggregated_model_event.wait(timeout=Settings.training.AGGREGATION_TIMEOUT)
-
-        if event_set:
-            # The event was set before the timeout
-            logger.info(state.addr, "✅ Aggregation event received.")
-        else:
-            raise RuntimeError(f"aggregation timeout before verified model installation: round={state.round}, node={state.addr}")
-
-        if state.round not in state.installed_model_hashes:
-            raise RuntimeError(f"aggregation event without verified installation: round={state.round}, node={state.addr}")
+        deadline = time.monotonic() + Settings.training.AGGREGATION_TIMEOUT
+        with state.aggregate_installation_condition:
+            while (
+                state.installed_model_hashes.get(round_number) != state.verified_model_hashes.get(round_number)
+                or round_number not in state.verified_model_hashes
+            ):
+                error = state.aggregate_installation_errors.get(round_number)
+                if error is not None:
+                    raise RuntimeError(f"verified aggregate receiver failed: round={round_number}, node={state.addr}, cause={error}")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(
+                        "aggregation timeout before verified model installation: "
+                        f"round={round_number}, node={state.addr}, "
+                        f"installed={state.installed_model_hashes.get(round_number)}, "
+                        f"verified={state.verified_model_hashes.get(round_number)}"
+                    )
+                state.aggregate_installation_condition.wait(remaining)
+        state.record_aggregate_lifecycle(
+            round_number,
+            "installation_wait_satisfied",
+            expected_aggregate_hash=state.verified_model_hashes[round_number],
+            installed_record=True,
+        )
+        logger.info(state.addr, "✅ Verified aggregate installation received.")
 
         # Get aggregated model
         logger.debug(
