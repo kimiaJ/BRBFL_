@@ -188,7 +188,11 @@ def test_benign_partition_is_unchanged_when_only_node_one_is_poisoned():
 def test_asr_excludes_target_and_is_exact_and_handles_zero_eligible():
     result = triggered_asr_counts(torch.tensor([2, 2, 1, 2]), torch.tensor([0, 2, 3, 4]), 2)
     assert result == {"triggered_test_target_prediction_count": 2, "eligible_triggered_examples": 3, "triggered_test_asr": 2 / 3}
-    assert triggered_asr_counts(torch.tensor([2, 1]), torch.tensor([2, 2]), 2)["triggered_test_asr"] == 0.0
+    assert triggered_asr_counts(torch.tensor([2, 1]), torch.tensor([2, 2]), 2) == {
+        "triggered_test_target_prediction_count": 0,
+        "eligible_triggered_examples": 0,
+        "triggered_test_asr": None,
+    }
 
 
 def test_comparison_reports_participants_and_poison_application():
@@ -196,13 +200,32 @@ def test_comparison_reports_participants_and_poison_application():
         "final_model_sha256": "clean",
         "malicious_node_ids": [],
         "per_node_poisoning_evidence": [{"node_id": f"node-{i}", "attack_application_count": 0} for i in range(3)],
-        "rounds": [{"participating_node_ids": ["node-0", "node-1", "node-2"], "clean_test_accuracy": 0.5, "triggered_test_asr": 0.1}],
+        "rounds": [
+            {
+                "participating_node_ids": ["node-0", "node-1", "node-2"],
+                "malicious_participant_ids": [],
+                "clean_test_accuracy": 0.5,
+                "triggered_test_asr": 0.1,
+                "triggered_test_target_prediction_count": 1,
+                "eligible_triggered_examples": 10,
+                "per_node_metrics": [
+                    {"node_id": "node-0", "metric": "triggered_test_target_prediction_count", "value": 1},
+                    {"node_id": "node-0", "metric": "eligible_triggered_examples", "value": 10},
+                ],
+            }
+        ],
     }
     attacked = copy.deepcopy(base)
     attacked["final_model_sha256"] = "attacked"
     attacked["malicious_node_ids"] = ["node-1"]
     attacked["per_node_poisoning_evidence"][1]["attack_application_count"] = 1
-    attacked["rounds"][0].update(clean_test_accuracy=0.4, triggered_test_asr=0.3)
+    attacked["rounds"][0].update(
+        clean_test_accuracy=0.4,
+        malicious_participant_ids=["node-1"],
+        triggered_test_asr=0.3,
+        triggered_test_target_prediction_count=3,
+    )
+    attacked["rounds"][0]["per_node_metrics"][0]["value"] = 3
     result = compare_evidence(base, attacked)
     assert result["final_models_differ"]
     assert result["participants_equal"]

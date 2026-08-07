@@ -42,6 +42,7 @@ from brbfl.experiments.config import TopologyType as ConfigTopologyType
 from brbfl.experiments.datasets import partition_dataset
 from brbfl.experiments.manifest import write_manifest
 from brbfl.experiments.reproducibility import seed_everything
+from brbfl.experiments.round_evidence import assert_round_evidence, malicious_participants, triggered_round_metrics
 from brbfl.experiments.sign_flipping_evidence import AuditedModelUpdateAttack
 from p2pfl.communication.protocols.protobuff.grpc import GrpcCommunicationProtocol
 from p2pfl.communication.protocols.protobuff.memory import MemoryCommunicationProtocol
@@ -411,6 +412,46 @@ def mnist(
             if attack_name == "sign_flipping"
             else "dataset_preparation_after_partitioning_before_node_creation"
         )
+        configured_malicious = [f"node-{i}" for i in adversary_indices]
+        round_evidence = []
+        for round_number in range(r):
+            per_node_metrics = [row for row in metric_rows if row["round"] == round_number]
+            participating_node_ids = [
+                node_id
+                for node_id in participating
+                if node_id not in model_update_audits or model_update_audits[node_id].participated_in_round(round_number)
+            ]
+            evidence = {
+                "round": round_number,
+                "clean_test_loss": round_metric(round_number, "test_loss"),
+                "clean_test_accuracy": round_metric(round_number, "test_metric"),
+                **triggered_round_metrics(per_node_metrics),
+                "participating_node_ids": participating_node_ids,
+                "malicious_participant_ids": malicious_participants(participating_node_ids, configured_malicious),
+                "attack_application_counts": {
+                    f"node-{i}": (
+                        sum(event["round_id"] == str(round_number) for event in model_update_audits[f"node-{i}"].events)
+                        if f"node-{i}" in model_update_audits
+                        else 0
+                    )
+                    for i in range(n)
+                }
+                if attack_name == "sign_flipping"
+                else {row["node_id"]: row["attack_application_count"] for row in partition_audits},
+                "model_update_transformations": {
+                    node_id: audit.evidence_for_round(round_number)
+                    for node_id, audit in model_update_audits.items()
+                    if str(round_number) in audit.eligible_round_ids()
+                },
+                "model_update_transmissions": {
+                    node_id: [event for event in audit.transmissions if event["round_id"] == str(round_number)]
+                    for node_id, audit in model_update_audits.items()
+                },
+                "per_node_metrics": per_node_metrics,
+            }
+            assert_round_evidence(evidence, configured_malicious)
+            round_evidence.append(evidence)
+
         write_evidence(
             config.output_dir,
             {
@@ -426,7 +467,7 @@ def mnist(
                 },
                 "seeds": {"experiment": config.seed, "partition": config.seed, "poisoning": attack_params.get("seed", config.seed)},
                 "lifecycle_stage": lifecycle_stage,
-                "malicious_node_ids": [f"node-{i}" for i in adversary_indices],
+                "malicious_node_ids": configured_malicious,
                 "source_target_labels": {str(key): value for key, value in attack_params.get("flip_map", {}).items()},
                 "original_dataset_unchanged": labels(data) == source_labels_before,
                 "partitions": partition_audits,
@@ -475,45 +516,7 @@ def mnist(
                     }
                     for node_id, audit in model_update_audits.items()
                 },
-                "rounds": [
-                    {
-                        "round": round_number,
-                        "clean_test_loss": round_metric(round_number, "test_loss"),
-                        "clean_test_accuracy": round_metric(round_number, "test_metric"),
-                        "triggered_test_asr": round_metric(round_number, "triggered_test_asr"),
-                        "triggered_test_target_prediction_count": int(round_metric(round_number, "triggered_test_target_prediction_count")),
-                        "eligible_triggered_examples": int(round_metric(round_number, "eligible_triggered_examples")),
-                        "participating_node_ids": [
-                            node_id
-                            for node_id in participating
-                            if node_id not in model_update_audits or model_update_audits[node_id].participated_in_round(round_number)
-                        ],
-                        "malicious_participant_ids": [
-                            node_id for node_id, audit in model_update_audits.items() if audit.participated_in_round(round_number)
-                        ],
-                        "attack_application_counts": {
-                            f"node-{i}": (
-                                sum(event["round_id"] == str(round_number) for event in model_update_audits[f"node-{i}"].events)
-                                if f"node-{i}" in model_update_audits
-                                else 0
-                            )
-                            for i in range(n)
-                        }
-                        if attack_name == "sign_flipping"
-                        else {row["node_id"]: row["attack_application_count"] for row in partition_audits},
-                        "model_update_transformations": {
-                            node_id: audit.evidence_for_round(round_number)
-                            for node_id, audit in model_update_audits.items()
-                            if str(round_number) in audit.eligible_round_ids()
-                        },
-                        "model_update_transmissions": {
-                            node_id: [event for event in audit.transmissions if event["round_id"] == str(round_number)]
-                            for node_id, audit in model_update_audits.items()
-                        },
-                        "per_node_metrics": [row for row in metric_rows if row["round"] == round_number],
-                    }
-                    for round_number in range(r)
-                ],
+                "rounds": round_evidence,
                 "final_model_sha256": parameter_hash(nodes[0].get_model().get_parameters()),
             },
         )

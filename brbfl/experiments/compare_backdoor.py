@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from brbfl.experiments.round_evidence import assert_round_evidence
+
 
 def _load(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -18,9 +20,15 @@ def compare_evidence(clean: dict[str, Any], attacked: dict[str, Any]) -> dict[st
     attacked_rounds = attacked["rounds"]
     if len(clean_rounds) != len(attacked_rounds):
         raise AssertionError("controlled runs have different round counts")
+    for round_evidence in clean_rounds:
+        assert_round_evidence(round_evidence, clean["malicious_node_ids"])
+    for round_evidence in attacked_rounds:
+        assert_round_evidence(round_evidence, attacked["malicious_node_ids"])
     participant_equality = [
         a["participating_node_ids"] == b["participating_node_ids"] for a, b in zip(clean_rounds, attacked_rounds, strict=True)
     ]
+    if not all(participant_equality):
+        raise AssertionError("evidence correction must not change clean/attacked participant lists")
     result = {
         "clean_final_model_sha256": clean["final_model_sha256"],
         "attacked_final_model_sha256": attacked["final_model_sha256"],
@@ -30,7 +38,10 @@ def compare_evidence(clean: dict[str, Any], attacked: dict[str, Any]) -> dict[st
             for a, b in zip(clean_rounds, attacked_rounds, strict=True)
         ],
         "genuine_triggered_asr_differences_by_round": [
-            b.get("triggered_test_asr", 0.0) - a.get("triggered_test_asr", 0.0) for a, b in zip(clean_rounds, attacked_rounds, strict=True)
+            None
+            if a["triggered_test_asr"] is None or b["triggered_test_asr"] is None
+            else b["triggered_test_asr"] - a["triggered_test_asr"]
+            for a, b in zip(clean_rounds, attacked_rounds, strict=True)
         ],
         "participant_equality_by_round": participant_equality,
         "participants_equal": all(participant_equality),
