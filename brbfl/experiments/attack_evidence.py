@@ -11,6 +11,10 @@ from typing import Any
 
 import numpy as np
 
+# Explicit registration is intentional: an unknown model-poisoning attack must not
+# silently acquire permission to pass the partition audit.
+DATASET_PRESERVING_ATTACKS = frozenset({"sign_flipping", "free_rider", "collusion"})
+
 
 def labels(dataset: Any) -> list[int]:
     """Return the untransformed training labels from a P2PFL partition."""
@@ -174,10 +178,30 @@ def _validate_backdoor(node_id: int, before: PartitionSnapshot, after: Partition
     )
 
 
+def _validate_unchanged_partition(node_id: int, attack_type: str, before: PartitionSnapshot, after: PartitionSnapshot) -> None:
+    """Validate a registered model-poisoning attack without inspecting model updates."""
+    if len(before.rows) != len(after.rows):
+        raise AssertionError(f"node-{node_id} {attack_type} changed its partition sample count")
+    if before.image_sha256 != after.image_sha256:
+        raise AssertionError(f"node-{node_id} {attack_type} unexpectedly changed its partition images")
+    if before.label_sha256 != after.label_sha256:
+        raise AssertionError(f"node-{node_id} {attack_type} unexpectedly changed its partition labels")
+    if before.sha256 != after.sha256:
+        raise AssertionError(f"node-{node_id} {attack_type} unexpectedly changed its dataset partition")
+
+
 def audit_partition(
     *, node_id: int, attack_type: str, before: PartitionSnapshot, after: Any, malicious: bool, attack: Any | None = None
 ) -> dict[str, Any]:
-    """Dispatch generic partition evidence to exactly one attack-specific validator."""
+    """
+    Dispatch generic evidence to exactly one partition validator.
+
+    Clean and benign nodes use the benign unchanged-partition check regardless of
+    the configured attack. Malicious label-flipping and backdoor nodes use their
+    transformation-specific validators. Sign-flipping, free-rider, and collusion
+    are explicitly registered as dataset-preserving model attacks and use the
+    unchanged-partition validator. Every unregistered malicious attack fails.
+    """
     evidence, after_snapshot = _partition_diff(before, after)
     evidence.update({"attack_type": attack_type, "node_id": f"node-{node_id}", "malicious": malicious})
     if not malicious:
@@ -197,9 +221,19 @@ def audit_partition(
         )
     elif attack_type == "backdoor":
         _validate_backdoor(node_id, before, after_snapshot, evidence, attack)
-    elif attack_type in {"sign_flipping", "free_rider"}:
-        if evidence["image_changed_indices"] or evidence["label_changed_indices"]:
-            raise AssertionError(f"node-{node_id} {attack_type} unexpectedly changed its dataset partition")
+    elif attack_type in DATASET_PRESERVING_ATTACKS:
+        _validate_unchanged_partition(node_id, attack_type, before, after_snapshot)
+        if attack_type == "collusion":
+            evidence.update(
+                {
+                    "source_sample_count": len(before.rows),
+                    "result_sample_count": len(after_snapshot.rows),
+                    "poisoned_image_count": 0,
+                    "poisoned_label_count": 0,
+                    "backdoor_trigger_applied": False,
+                    "label_flipping_applied": False,
+                }
+            )
         evidence.update({"samples_poisoned": 0, "source_partition_unchanged": True, "attack_application_count": 0})
         return evidence
     else:

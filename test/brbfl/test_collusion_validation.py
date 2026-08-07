@@ -3,15 +3,74 @@
 
 import numpy as np
 import pytest
+from datasets import Dataset, DatasetDict
 
 from brbfl.attacks.collusion import CollusionAttack
 from brbfl.attacks.registry import create_attack
+from brbfl.experiments.attack_evidence import audit_partition, snapshot_partition
 from brbfl.experiments.collusion_evidence import CollusionLifecycleAudit, cosine, delta
 from brbfl.experiments.config import load_experiment_config
+from p2pfl.learning.dataset.p2pfl_dataset import P2PFLDataset
 
 
 def attack():
     return CollusionAttack("g", [1, 2], 42, 1.0)
+
+
+def partition():
+    rows = {"image": [np.zeros((2, 2), dtype=np.uint8), np.ones((2, 2), dtype=np.uint8)], "label": [1, 2]}
+    return P2PFLDataset(DatasetDict({"train": Dataset.from_dict(rows), "test": Dataset.from_dict(rows)}))
+
+
+def test_collusion_partition_dispatch_preserves_all_data_for_attacked_and_clean_nodes():
+    nodes = [partition() for _ in range(3)]
+    snapshots = [snapshot_partition(node) for node in nodes]
+
+    attacked = [
+        audit_partition(
+            node_id=i,
+            attack_type="collusion",
+            before=snapshots[i],
+            after=nodes[i],
+            malicious=i in {1, 2},
+            attack=attack() if i in {1, 2} else None,
+        )
+        for i in range(3)
+    ]
+    clean = [audit_partition(node_id=i, attack_type="none", before=snapshots[i], after=nodes[i], malicious=False) for i in range(3)]
+
+    for index in (1, 2):
+        evidence = attacked[index]
+        assert evidence["source_sample_count"] == evidence["result_sample_count"] == 2
+        assert evidence["before_image_sha256"] == evidence["after_image_sha256"]
+        assert evidence["before_label_sha256"] == evidence["after_label_sha256"]
+        assert evidence["source_partition_sha256"] == evidence["result_partition_sha256"]
+        assert evidence["poisoned_image_count"] == evidence["poisoned_label_count"] == 0
+        assert evidence["samples_poisoned"] == 0
+        assert evidence["backdoor_trigger_applied"] is evidence["label_flipping_applied"] is False
+    assert attacked[0]["source_partition_sha256"] == attacked[0]["result_partition_sha256"]
+    assert attacked[0]["image_changed_indices"] == attacked[0]["label_changed_indices"] == []
+    assert [row["result_partition_sha256"] for row in clean] == [row["result_partition_sha256"] for row in attacked]
+
+
+def test_unknown_attack_does_not_inherit_model_poisoning_partition_validation():
+    node = partition()
+    with pytest.raises(AssertionError, match="node-1 has no partition audit validator for attack type 'unknown_model_attack'"):
+        audit_partition(
+            node_id=1,
+            attack_type="unknown_model_attack",
+            before=snapshot_partition(node),
+            after=node,
+            malicious=True,
+        )
+
+
+@pytest.mark.parametrize("attack_type", ["sign_flipping", "free_rider"])
+def test_existing_model_poisoning_partition_dispatch_remains_unchanged(attack_type):
+    node = partition()
+    evidence = audit_partition(node_id=1, attack_type=attack_type, before=snapshot_partition(node), after=node, malicious=True)
+    assert evidence["samples_poisoned"] == evidence["attack_application_count"] == 0
+    assert evidence["source_partition_unchanged"] is True
 
 
 def test_configuration_and_registry():
