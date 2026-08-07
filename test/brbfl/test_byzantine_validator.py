@@ -191,3 +191,175 @@ def test_hash_is_order_sensitive_and_repeated_hashing_is_stable():
     values = [np.array([1], dtype=np.int32), np.array([2], dtype=np.int32)]
     assert parameter_hash(values) == parameter_hash(values)
     assert parameter_hash(values) != parameter_hash(list(reversed(values)))
+
+
+def _comparison_fixture():
+    """Return the real two-round causal shape in a compact regression fixture."""
+    from copy import deepcopy
+
+    validators = ["node-0", "node-3", "node-4"]
+    contributors = ["node-0", "node-1", "node-2"]
+    config = {
+        "nodes": 5,
+        "rounds": 2,
+        "epochs": 1,
+        "seed": 666,
+        "protocol": "memory",
+        "framework": "pytorch",
+        "aggregator": "fedavg",
+        "topology": "full",
+        "batch_size": 128,
+        "eligible_trainers": contributors,
+        "dataset": {"name": "MNIST", "distribution": "iid"},
+        "validation": {"contributors": contributors, "validators": validators, "quorum": 3, "acceptance_threshold": 2},
+    }
+    roles = {
+        "configured_contributors": contributors,
+        "configured_validators": validators,
+        "actual_training_nodes": contributors,
+        "eligible_trainers": contributors,
+    }
+
+    def vote(candidate, validator, reference, attacked):
+        byzantine = validator in {"node-3", "node-4"} and attacked
+        return {
+            "validator_node_id": validator,
+            "reference_decision": reference,
+            "reported_decision": not reference if byzantine else reference,
+            "attack_application_count": int(byzantine),
+            "byzantine": byzantine,
+        }
+
+    def build(attacked):
+        rows = []
+        rounds = []
+        parent = "initial"
+        for round_number in range(2):
+            admitted = []
+            inputs = {}
+            result = (
+                ("attack-global-0" if attacked else "clean-global-0")
+                if round_number == 0
+                else ("attack-global-1" if attacked else "clean-global-1")
+            )
+            for candidate in contributors:
+                reference = candidate != "node-0"
+                is_admitted = reference if not attacked else not reference
+                submitted = f"same-0-{candidate}" if round_number == 0 else f"{'attack' if attacked else 'clean'}-1-{candidate}"
+                if is_admitted:
+                    admitted.append(candidate)
+                    inputs[candidate] = submitted
+                rows.append(
+                    {
+                        "round": round_number,
+                        "candidate_node_id": candidate,
+                        "current_node": candidate,
+                        "parent_global_model_sha256": parent,
+                        "submitted_model_sha256": submitted,
+                        "votes": [vote(candidate, validator, reference, attacked) for validator in validators],
+                        "admitted": is_admitted,
+                        "reached_aggregator_add_model": is_admitted,
+                        "aggregation_input_sha256": submitted if is_admitted else None,
+                        "aggregation_matches_submitted_snapshot": True if is_admitted else None,
+                    }
+                )
+            rounds.append(
+                {
+                    "round": round_number,
+                    "trainer_roles": dict(roles, byzantine_validators=["node-3", "node-4"] if attacked else []),
+                    "aggregation_lineage": {
+                        "contributors": admitted,
+                        "input_hashes": inputs,
+                        "installed_global_model_sha256": result,
+                        "canonical_hash_source": "fixture",
+                    },
+                }
+            )
+            parent = result
+        return {
+            "configuration": deepcopy(config),
+            "seeds": {"experiment": 666, "partition": 666},
+            "partitions": [{"node_id": node, "partition_indices_sha256": node} for node in contributors],
+            "malicious_node_ids": ["node-3", "node-4"] if attacked else [],
+            "validator_admission": rows,
+            "rounds": rounds,
+            "final_model_sha256": parent,
+        }
+
+    return build(False), build(True)
+
+
+def test_causal_comparator_accepts_real_round_one_node_zero_shape():
+    from brbfl.experiments.compare_byzantine_validator import compare_evidence
+
+    clean, attacked = _comparison_fixture()
+    result = compare_evidence(clean, attacked)
+    assert result["first_changed_admission"] == {
+        "round": 0,
+        "candidate_node_id": "node-0",
+        "clean_admitted": False,
+        "attacked_admitted": True,
+    }
+    assert result["first_downstream_candidate_difference"]["candidate_node_id"] == "node-0"
+    assert result["first_downstream_candidate_difference"]["expected_downstream_effect"] is True
+
+
+@pytest.mark.parametrize(
+    "mutation,match",
+    [
+        (
+            lambda clean, attacked: attacked["validator_admission"][2].update(submitted_model_sha256="early-difference"),
+            "pre-intervention candidate/parent mismatch",
+        ),
+        (lambda clean, attacked: attacked["partitions"][0].update(partition_indices_sha256="different"), "controlled partitions differ"),
+        (lambda clean, attacked: attacked["seeds"].update(experiment=777), "controlled seeds differ"),
+        (
+            lambda clean, attacked: attacked["rounds"][0]["trainer_roles"].update(actual_training_nodes=["node-0"]),
+            "controlled trainer_roles differ",
+        ),
+        (
+            lambda clean, attacked: attacked["validator_admission"][0]["votes"][0].update(reported_decision=True),
+            "honest validator falsified",
+        ),
+        (
+            lambda clean, attacked: attacked["validator_admission"][0]["votes"][0].update(reference_decision=True),
+            "reference decision differs",
+        ),
+        (
+            lambda clean, attacked: attacked["validator_admission"][3].update(parent_global_model_sha256="wrong"),
+            "parent is not the prior installed",
+        ),
+        (
+            lambda clean, attacked: attacked["validator_admission"][0].update(aggregation_input_sha256="wrong"),
+            "aggregation-input hash differs",
+        ),
+    ],
+)
+def test_causal_comparator_rejects_broken_invariants(mutation, match):
+    from brbfl.experiments.compare_byzantine_validator import compare_evidence
+
+    clean, attacked = _comparison_fixture()
+    mutation(clean, attacked)
+    with pytest.raises(AssertionError, match=match):
+        compare_evidence(clean, attacked)
+
+
+def test_later_candidate_difference_requires_prior_global_divergence():
+    from brbfl.experiments.compare_byzantine_validator import compare_evidence
+
+    clean, attacked = _comparison_fixture()
+    attacked["rounds"][0]["aggregation_lineage"]["installed_global_model_sha256"] = "clean-global-0"
+    for row in attacked["validator_admission"]:
+        if row["round"] == 1:
+            row["parent_global_model_sha256"] = "clean-global-0"
+    with pytest.raises(AssertionError, match="pre-intervention candidate/parent mismatch"):
+        compare_evidence(clean, attacked)
+
+
+def test_lineage_is_required():
+    from brbfl.experiments.compare_byzantine_validator import compare_evidence
+
+    clean, attacked = _comparison_fixture()
+    del attacked["validator_admission"][0]["parent_global_model_sha256"]
+    with pytest.raises(AssertionError, match="lacks required parent-model lineage"):
+        compare_evidence(clean, attacked)

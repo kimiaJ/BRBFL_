@@ -115,6 +115,7 @@ class PartialModelCommand(Command):
                         lifecycle_path="PartialModelCommand",
                         expected_hash=expected_hash,
                         transport_occurred=True,
+                        parent_global_model_sha256=(submission or {}).get("parent_global_model_sha256"),
                     )
                 )
                 if admitted:
