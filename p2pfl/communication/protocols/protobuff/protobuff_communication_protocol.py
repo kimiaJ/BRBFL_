@@ -18,6 +18,7 @@
 """GRPC communication protocol."""
 
 import random
+import threading
 from abc import abstractmethod
 from collections.abc import Callable
 from datetime import datetime
@@ -118,6 +119,11 @@ class ProtobuffCommunicationProtocol(CommunicationProtocol):
         """Stop the GRPC communication protocol."""
         self._heartbeater.stop()
         self._gossiper.stop()
+        # These workers are non-daemon threads.  A failed experiment must not
+        # leave either one keeping the interpreter alive indefinitely.
+        for worker in (self._heartbeater, self._gossiper):
+            if worker.is_alive() and worker is not threading.current_thread():
+                worker.join(timeout=max(1.0, float(Settings.gossip.PERIOD) + 1.0))
         self._neighbors.clear_neighbors()
         self._server.stop()
 

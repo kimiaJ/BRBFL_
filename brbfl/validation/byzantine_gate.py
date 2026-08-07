@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -342,14 +343,62 @@ class ValidatorSubgroupGate:
 _gate_policy: AdmissionPolicy | None = None
 _gates: dict[str, ValidatorSubgroupGate] = {}
 _registry_lock = threading.Lock()
+_registry_condition = threading.Condition(_registry_lock)
+_round_decisions: dict[int, dict[str, bool]] = {}
+_round_barriers: dict[int, set[str]] = {}
 
 
 def install_validator_gate(gate: ValidatorSubgroupGate) -> None:
     """Install a policy whose ledgers are isolated for every node."""
     global _gate_policy
-    with _registry_lock:
+    with _registry_condition:
         _gate_policy = gate.policy
         _gates.clear()
+        _round_decisions.clear()
+        _round_barriers.clear()
+
+
+def publish_admission_decision(round_id: int, candidate: str, admitted: bool) -> None:
+    """Publish the final candidate decision to the process-wide canonical ledger."""
+    with _registry_condition:
+        decisions = _round_decisions.setdefault(int(round_id), {})
+        previous = decisions.setdefault(candidate, bool(admitted))
+        if previous != bool(admitted):
+            raise RuntimeError(f"conflicting admission decision: round={round_id}, candidate={candidate}")
+        _registry_condition.notify_all()
+
+
+def wait_for_admitted_contributors(round_id: int, timeout: float) -> tuple[str, ...]:
+    """Return the one canonical admitted set once every contributor is decided."""
+    deadline = time.monotonic() + timeout
+    with _registry_condition:
+        if _gate_policy is None:
+            raise RuntimeError("validator admission policy is not installed")
+        configured = tuple(sorted(_gate_policy.contributors))
+        while set(_round_decisions.get(int(round_id), {})) != set(configured):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                missing = sorted(set(configured) - set(_round_decisions.get(int(round_id), {})))
+                raise TimeoutError(f"admission decisions timed out: round={round_id}, missing={missing}")
+            _registry_condition.wait(remaining)
+        return tuple(candidate for candidate in configured if _round_decisions[int(round_id)][candidate])
+
+
+def wait_at_round_barrier(round_id: int, node_id: str, timeout: float) -> None:
+    """Prevent any participant entering the next round before all finish this one."""
+    deadline = time.monotonic() + timeout
+    with _registry_condition:
+        if _gate_policy is None:
+            return
+        participants = set(_gate_policy.contributors) | set(_gate_policy.validators)
+        arrived = _round_barriers.setdefault(int(round_id), set())
+        arrived.add(node_id)
+        _registry_condition.notify_all()
+        while arrived != participants:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"round barrier timed out: round={round_id}, missing={sorted(participants - arrived)}")
+            _registry_condition.wait(remaining)
 
 
 def get_validator_gate(node_id: str | None = None) -> ValidatorSubgroupGate | None:
@@ -372,6 +421,9 @@ def validator_evidence() -> list[dict[str, Any]]:
 def clear_validator_gate() -> None:
     """Remove experiment state during deterministic shutdown."""
     global _gate_policy
-    with _registry_lock:
+    with _registry_condition:
         _gate_policy = None
         _gates.clear()
+        _round_decisions.clear()
+        _round_barriers.clear()
+        _registry_condition.notify_all()

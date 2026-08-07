@@ -44,6 +44,16 @@ class WaitAggregatedModelsStage(Stage):
         if state is None or communication_protocol is None:
             raise Exception("Invalid parameters on WaitAggregatedModelsStage.")
         round_number = int(state.round)
+        # Admission completion is the earliest generic readiness boundary.  In
+        # particular, do not start the installation timeout for a future round
+        # while contributors are still deciding the current aggregation set.
+        from brbfl.validation import get_validator_gate
+        from brbfl.validation.byzantine_gate import wait_for_admitted_contributors
+
+        if get_validator_gate(state.addr) is not None:
+            state.expected_aggregation_models[round_number] = wait_for_admitted_contributors(
+                round_number, Settings.training.AGGREGATION_TIMEOUT
+            )
         state.record_aggregate_lifecycle(
             round_number,
             "installation_wait_started",

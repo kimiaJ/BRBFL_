@@ -30,6 +30,7 @@ from p2pfl.learning.aggregators.aggregator import Aggregator, NoModelsToAggregat
 from p2pfl.learning.frameworks.learner import Learner
 from p2pfl.management.logger import logger
 from p2pfl.node_state import NodeState
+from p2pfl.settings import Settings
 from p2pfl.stages.stage import EarlyStopException, Stage, check_early_stop
 from p2pfl.stages.stage_factory import StageFactory
 
@@ -138,6 +139,16 @@ class TrainStage(Stage):
                 lifecycle_path="TrainStage",
                 parent_global_model_sha256=parent_global_model_sha256,
             )
+            if gate is not None:
+                from brbfl.validation.byzantine_gate import publish_admission_decision, wait_for_admitted_contributors
+
+                publish_admission_decision(int(state.round), state.addr, admitted)
+                admitted_contributors = list(
+                    wait_for_admitted_contributors(int(state.round), timeout=Settings.training.AGGREGATION_TIMEOUT)
+                )
+                aggregator.set_admitted_contributors(admitted_contributors)
+                state.expected_aggregation_models[int(state.round)] = tuple(admitted_contributors)
+                state.trainer_role_evidence[int(state.round)]["expected_aggregation_models"] = admitted_contributors
             if admitted:
                 if gate is not None:
                     # This metadata is serialized with the real model parameters.
