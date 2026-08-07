@@ -41,6 +41,7 @@ def parameter_delta(before: list[Any], after: list[Any], tolerance: float = ZERO
         "pre_to_submission_delta_l2_norm": norm,
         "maximum_absolute_delta": maximum,
         "all_submitted_parameters_equal_pre_training": exact,
+        "parameters_equal_to_pre_training": exact,
         "zero_delta_tolerance": tolerance,
         "zero_delta_within_tolerance": norm <= tolerance and maximum <= tolerance,
     }
@@ -54,8 +55,9 @@ class TrainingLifecycleAudit:
         self.attack = attack
         self.configured_epochs = configured_epochs
         self.configured_batch_count = configured_batch_count
-        self.rounds: dict[str, dict[str, Any]] = {}
-        self.current_round: str | None = None
+        self.node_id = "unknown"
+        self.rounds: dict[int, dict[str, Any]] = {}
+        self.current_round: int | None = None
 
     def __bool__(self) -> bool:
         """Retain the truth value of the wrapped attack."""
@@ -78,16 +80,27 @@ class TrainingLifecycleAudit:
 
     def begin_local_training(self, round_id: Any, parameters: list[Any]) -> None:
         """Freeze the actual model received immediately before the fit decision."""
-        key = str(round_id)
+        key = int(round_id)
+        if key in self.rounds:
+            raise RuntimeError(f"audit record already initialized: node={self.node_id}, round={key}")
         snapshot = [np.asarray(value).copy() for value in parameters]
         self.current_round = key
         self.rounds[key] = {
+            "record_initialized": True,
+            "record_finalized": False,
+            "local_training_started": True,
+            "local_training_finished": False,
+            "submission_produced": False,
+            "submission_reached_aggregation": False,
             "local_training_invocation_count": 1,
             "optimizer_step_count": 0,
             "configured_local_epochs": self.configured_epochs,
             "configured_batch_count": self.configured_batch_count,
             "local_epochs_actually_executed": 0,
+            "effective_local_epochs": 0,
             "free_rider_attack_application_count": 0,
+            "attack_application_count": 0,
+            "training_skipped": None,
             "pre_training_model_sha256": canonical_parameter_hash(snapshot),
             "_pre": snapshot,
         }
@@ -96,8 +109,13 @@ class TrainingLifecycleAudit:
         """Apply and count the explicit training-control decision once."""
         hook = getattr(self.attack, "should_skip_local_training", None)
         skip = bool(hook and hook())
+        row = self.rounds[self.current_round]
+        if row["training_skipped"] is not None:
+            raise RuntimeError(f"training branch already selected: node={self.node_id}, round={self.current_round}")
+        row["training_skipped"] = skip
         if skip:
-            self.rounds[self.current_round]["free_rider_attack_application_count"] += 1
+            row["free_rider_attack_application_count"] += 1
+            row["attack_application_count"] += 1
         return skip
 
     def record_optimizer_step(self) -> None:
@@ -105,11 +123,23 @@ class TrainingLifecycleAudit:
         if self.current_round is not None:
             self.rounds[self.current_round]["optimizer_step_count"] += 1
 
+    def record_optimizer_steps(self, count: int) -> None:
+        """Record the observed count returned with a locally or remotely fitted model."""
+        if count < 0:
+            raise ValueError("optimizer step count cannot be negative")
+        self.rounds[self.current_round]["optimizer_step_count"] = count
+        self.rounds[self.current_round]["observed_batch_count"] = count
+
     def complete_local_training(self, parameters: list[Any], skipped: bool) -> None:
         """Record the post-fit or deliberately skipped model."""
         row = self.rounds[self.current_round]
+        if row["training_skipped"] is not skipped:
+            raise RuntimeError(f"training branches disagree: node={self.node_id}, round={self.current_round}")
+        row["local_training_finished"] = True
         row["local_epochs_actually_executed"] = 0 if skipped else self.configured_epochs
+        row["effective_local_epochs"] = row["local_epochs_actually_executed"]
         row["post_training_pre_submission_model_sha256"] = canonical_parameter_hash(parameters)
+        row["post_training_model_sha256"] = row["post_training_pre_submission_model_sha256"]
 
     def publish_update(self, parameters: list[Any]) -> list[Any]:
         """Freeze evidence from the model actually installed for submission."""
@@ -117,6 +147,7 @@ class TrainingLifecycleAudit:
         submitted = hook(parameters) if hook else parameters
         detached = [np.asarray(value).copy() for value in submitted]
         row = self.rounds[self.current_round]
+        row["submission_produced"] = True
         row["submitted_model_sha256"] = canonical_parameter_hash(detached)
         row.update(parameter_delta(row["_pre"], detached))
         return detached
@@ -126,14 +157,37 @@ class TrainingLifecycleAudit:
         row = self.rounds[self.current_round]
         aggregation_hash = canonical_parameter_hash(parameters)
         row["aggregation_input_sha256"] = aggregation_hash
+        row["submission_reached_aggregation"] = True
         row["aggregation_matches_submitted_snapshot"] = aggregation_hash == row["submitted_model_sha256"]
 
     def observe_global_model(self, parameters: list[Any]) -> None:
         """Record the model installed from real protocol aggregation."""
-        self.rounds[self.current_round]["global_model_after_aggregation_sha256"] = canonical_parameter_hash(parameters)
+        row = self.rounds[self.current_round]
+        if row["record_finalized"]:
+            raise RuntimeError(f"audit record already finalized: node={self.node_id}, round={self.current_round}")
+        if not row["submission_reached_aggregation"] or not row["aggregation_matches_submitted_snapshot"]:
+            raise RuntimeError(f"submission was not observed at aggregation: node={self.node_id}, round={self.current_round}")
+        if row["training_skipped"]:
+            assert row["optimizer_step_count"] == row["effective_local_epochs"] == 0
+        else:
+            assert row["attack_application_count"] == 0
+            if self.configured_batch_count:
+                assert row["optimizer_step_count"] > 0
+        row["global_model_after_aggregation_sha256"] = canonical_parameter_hash(parameters)
+        row["record_finalized"] = True
 
     def evidence_for_round(self, round_id: Any) -> dict[str, Any]:
         """Return JSON-safe evidence without the private parameter snapshot."""
-        row = dict(self.rounds[str(round_id)])
+        key = int(round_id)
+        source = self.rounds.get(key)
+        initialized = source is not None
+        finalized = bool(source and source.get("record_finalized"))
+        if not initialized or not finalized:
+            raise RuntimeError(
+                "training audit evidence unavailable: "
+                f"node={self.node_id}, requested_round={key}, available_round_keys={list(self.rounds)}, "
+                f"initialized={initialized}, finalized={finalized}"
+            )
+        row = dict(source)
         row.pop("_pre")
         return row

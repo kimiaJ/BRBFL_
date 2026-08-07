@@ -103,9 +103,8 @@ class MLP(L.LightningModule):
         y = batch["label"]
 
         attack = get_attack(getattr(self, "node_addr", None))
-        optimizer_step_recorder = getattr(attack, "record_optimizer_step", None)
-        if optimizer_step_recorder is not None:
-            optimizer_step_recorder()
+        # This value returns with the trained model when fit runs in a Ray actor.
+        self._brbfl_optimizer_step_count = getattr(self, "_brbfl_optimizer_step_count", 0) + 1
         x, y = poison_training_batch((x, y), attack)
 
         logits = self(x)
