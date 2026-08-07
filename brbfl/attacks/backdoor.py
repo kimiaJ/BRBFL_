@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import torch
 from datasets import DatasetDict
+from PIL import Image
 
 from brbfl.evaluation.metrics import MNISTTrigger, apply_mnist_trigger
 from p2pfl.learning.dataset.p2pfl_dataset import P2PFLDataset
@@ -88,12 +89,17 @@ class BackdoorAttack:
             if index not in poisoned_set:
                 return row
             changed = dict(row)
-            triggered = apply_mnist_trigger(torch.as_tensor(np.array(row["image"], copy=True)), self.trigger)
-            changed["image"] = triggered.cpu().numpy()
+            if isinstance(row["image"], Image.Image):
+                pixels = np.asarray(row["image"], dtype=np.uint8).copy()
+                pixels[..., -self.trigger_size :, -self.trigger_size :] = np.uint8(self.trigger_value)
+                changed["image"] = Image.fromarray(pixels)
+            else:
+                triggered = apply_mnist_trigger(torch.as_tensor(np.array(row["image"], copy=True)), self.trigger)
+                changed["image"] = triggered.cpu().numpy()
             changed["label"] = self.target_class
             return changed
 
-        poisoned_train = train.map(poison, with_indices=True)
+        poisoned_train = train.map(poison, with_indices=True, features=train.features)
         copied_data = DatasetDict({name: (poisoned_train if name == split_name else value) for name, value in dataset._data.items()})
         result = P2PFLDataset(
             copied_data,
