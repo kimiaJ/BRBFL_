@@ -47,7 +47,7 @@ from brbfl.experiments.manifest import write_manifest
 from brbfl.experiments.reproducibility import seed_everything
 from brbfl.experiments.round_evidence import assert_round_evidence, malicious_participants, triggered_round_metrics
 from brbfl.experiments.sign_flipping_evidence import AuditedModelUpdateAttack
-from brbfl.validation import AdmissionPolicy, ValidatorSubgroupGate, clear_validator_gate, install_validator_gate
+from brbfl.validation import AdmissionPolicy, ValidatorSubgroupGate, clear_validator_gate, install_validator_gate, validator_evidence
 from p2pfl.communication.protocols.protobuff.grpc import GrpcCommunicationProtocol
 from p2pfl.communication.protocols.protobuff.memory import MemoryCommunicationProtocol
 from p2pfl.learning.aggregators.scaffold import Scaffold
@@ -618,7 +618,7 @@ def mnist(
                     else None
                 ),
                 "attack_type": attack_name,
-                "validator_admission": validator_gate.evidence() if validator_gate is not None else [],
+                "validator_admission": validator_evidence() if validator_gate is not None else [],
                 "attack_strategy": attack_params.get("strategy") if attack_name in {"free_rider", "collusion"} else None,
                 "seeds": {"experiment": config.seed, "partition": config.seed, "poisoning": attack_params.get("seed", config.seed)},
                 "lifecycle_stage": lifecycle_stage,

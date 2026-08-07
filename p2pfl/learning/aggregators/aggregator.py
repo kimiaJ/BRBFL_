@@ -273,6 +273,12 @@ class Aggregator(NodeComponent):
             if all(n not in except_nodes for n in m.get_contributors()):
                 models_to_aggregate.append(m)
 
+        # A one-model "aggregation" needlessly performs multiply/divide in
+        # FedAvg.  Besides wasting work, that arithmetic can change low bits of
+        # float parameters.  Preserve the actual submitted model (and its
+        # transport evidence) when gossiping a single contribution.
+        if len(models_to_aggregate) == 1:
+            return models_to_aggregate[0]
         return self.aggregate(models_to_aggregate)
 
     def __get_remaining_model(self, except_nodes) -> P2PFLModel:

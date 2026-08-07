@@ -117,11 +117,30 @@ class TrainStage(Stage):
                 aggregation_observer(learner.get_model().get_parameters())
             from brbfl.validation import get_validator_gate
 
-            gate = get_validator_gate()
-            admitted = gate is None or gate.submit_and_decide(state.round, state.addr, learner.get_model().get_parameters())
+            gate = get_validator_gate(state.addr)
+            admitted = gate is None or gate.submit_and_decide(
+                state.round,
+                state.addr,
+                learner.get_model().get_parameters(),
+                current_node=state.addr,
+                lifecycle_path="TrainStage",
+            )
             if admitted:
                 if gate is not None:
-                    gate.observe_aggregation_input(state.round, state.addr, learner.get_model().get_parameters())
+                    # This metadata is serialized with the real model parameters.
+                    learner.get_model().additional_info["canonical_submission"] = {
+                        "round": int(state.round),
+                        "candidate": state.addr,
+                        "sha256": gate.submitted_hash(state.round, state.addr),
+                    }
+                    gate.observe_aggregation_input(
+                        state.round,
+                        state.addr,
+                        learner.get_model().get_parameters(),
+                        current_node=state.addr,
+                        lifecycle_path="TrainStage",
+                        transport_occurred=False,
+                    )
                 models_added = aggregator.add_model(learner.get_model())
             else:
                 models_added = aggregator.reject_model([state.addr])
