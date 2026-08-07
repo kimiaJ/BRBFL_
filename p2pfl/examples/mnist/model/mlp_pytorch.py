@@ -138,7 +138,8 @@ class MLP(L.LightningModule):
             x_trigger = apply_mnist_trigger(x, attack.trigger)
             pred_trigger = self(x_trigger).argmax(dim=1)
             result = triggered_asr_counts(pred_trigger, y, attack.target_class, attack.source_labels)
-            self.log("triggered_test_asr", result["triggered_test_asr"], batch_size=result["eligible_triggered_examples"])
+            if result["triggered_test_asr"] is not None:
+                self.log("triggered_test_asr", result["triggered_test_asr"], batch_size=result["eligible_triggered_examples"])
             self.log("triggered_test_target_prediction_count", float(result["triggered_test_target_prediction_count"]), reduce_fx="sum")
             self.log("eligible_triggered_examples", float(result["eligible_triggered_examples"]), reduce_fx="sum")
 

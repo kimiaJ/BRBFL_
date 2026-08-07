@@ -40,7 +40,7 @@ def apply_mnist_trigger(images: Any, trigger: MNISTTrigger) -> Any:
 
 def triggered_asr_counts(
     predictions: Any, original_labels: Any, target_label: int, source_labels: tuple[int, ...] | None = None
-) -> dict[str, float | int]:
+) -> dict[str, float | int | None]:
     """Calculate all-to-one ASR, excluding original target-label examples."""
     eligible = original_labels != target_label
     if source_labels is not None:
@@ -53,11 +53,13 @@ def triggered_asr_counts(
     return {
         "triggered_test_target_prediction_count": target_count,
         "eligible_triggered_examples": count,
-        "triggered_test_asr": target_count / count if count else 0.0,
+        # No eligible examples means that ASR is undefined, rather than a
+        # successful attack rate of zero.
+        "triggered_test_asr": target_count / count if count else None,
     }
 
 
-def evaluate_batch(logits: Any, labels: Any, target_label: int) -> dict[str, float | int]:
+def evaluate_batch(logits: Any, labels: Any, target_label: int) -> dict[str, float | int | None]:
     """Evaluate controlled logits using the genuine ASR formula."""
     return triggered_asr_counts(logits.argmax(dim=1), labels, target_label)
 
