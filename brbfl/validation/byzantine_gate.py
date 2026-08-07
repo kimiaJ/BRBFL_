@@ -18,12 +18,37 @@ from typing import Any
 import numpy as np
 
 
-def _parameter_hash(parameters: list[Any]) -> str:
+def _as_numpy(parameter: Any) -> np.ndarray:
+    """Detach a framework value and return independent, stable CPU storage."""
+    value = parameter
+    if hasattr(value, "detach"):
+        value = value.detach()
+    if hasattr(value, "cpu"):
+        value = value.cpu()
+    if hasattr(value, "numpy"):
+        value = value.numpy()
+    result = np.ascontiguousarray(np.asarray(value)).copy()
+    result.flags.writeable = False
+    return result
+
+
+def canonical_parameters(parameters: list[Any]) -> tuple[np.ndarray, ...]:
+    """Canonical immutable, value-based representation of ordered parameters."""
+    return tuple(_as_numpy(parameter) for parameter in parameters)
+
+
+def parameter_hash(parameters: list[Any] | tuple[np.ndarray, ...]) -> str:
+    """Hash parameter values with unambiguous order, dtype, and shape framing."""
     digest = hashlib.sha256()
-    for parameter in parameters:
-        value = np.ascontiguousarray(np.asarray(parameter))
-        digest.update(value.dtype.str.encode())
-        digest.update(str(value.shape).encode())
+    for index, parameter in enumerate(parameters):
+        value = _as_numpy(parameter)
+        metadata = json.dumps(
+            {"index": index, "dtype": value.dtype.str, "shape": list(value.shape)},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        digest.update(len(metadata).to_bytes(8, "big"))
+        digest.update(metadata)
         digest.update(value.tobytes())
     return digest.hexdigest()
 
@@ -70,20 +95,52 @@ class ValidatorSubgroupGate:
         self._order = 0
         self._lock = threading.RLock()
 
-    def submit_and_decide(self, round_id: Any, candidate: str, parameters: list[Any]) -> bool:
+    def submit_and_decide(
+        self,
+        round_id: Any,
+        candidate: str,
+        parameters: list[Any],
+        *,
+        current_node: str = "unknown",
+        lifecycle_path: str = "unknown",
+        expected_hash: str | None = None,
+        transport_occurred: bool = False,
+    ) -> bool:
         """Record an immutable submission and perform validation exactly once."""
         round_number = self._round(round_id)
         if candidate not in self.policy.contributors:
             raise RuntimeError(f"candidate is not an eligible contributor: round={round_number}, candidate={candidate}")
         key = (round_number, candidate)
-        snapshot = [np.asarray(item).copy() for item in parameters]
-        submitted_hash = _parameter_hash(snapshot)
+        snapshot = canonical_parameters(parameters)
+        submitted_hash = parameter_hash(snapshot)
         with self._lock:
             existing = self._candidates.get(key)
             if existing is not None:
                 if existing["submitted_model_sha256"] != submitted_hash:
-                    raise RuntimeError(f"candidate snapshot changed after submission: round={round_number}, candidate={candidate}")
+                    raise self._integrity_error(
+                        round_number,
+                        candidate,
+                        current_node,
+                        lifecycle_path,
+                        existing["submitted_model_sha256"],
+                        submitted_hash,
+                        existing["_snapshot"],
+                        snapshot,
+                        transport_occurred,
+                    )
                 return bool(existing["admitted"])
+            if expected_hash is not None and expected_hash != submitted_hash:
+                raise self._integrity_error(
+                    round_number,
+                    candidate,
+                    current_node,
+                    lifecycle_path,
+                    expected_hash,
+                    submitted_hash,
+                    None,
+                    snapshot,
+                    transport_occurred,
+                )
             self._order += 1
             finite = all(bool(np.isfinite(item).all()) for item in snapshot)
             norm = math.sqrt(sum(float(np.sum(np.asarray(item, dtype=np.float64) ** 2)) for item in snapshot))
@@ -156,18 +213,70 @@ class ValidatorSubgroupGate:
             }
             return admitted
 
-    def observe_aggregation_input(self, round_id: Any, candidate: str, parameters: list[Any]) -> None:
+    def observe_aggregation_input(
+        self,
+        round_id: Any,
+        candidate: str,
+        parameters: list[Any],
+        *,
+        current_node: str = "unknown",
+        lifecycle_path: str = "unknown",
+        transport_occurred: bool = False,
+    ) -> None:
         """Prove an admitted immutable snapshot reached ``add_model``."""
         row = self._candidate(round_id, candidate, "observe aggregation input")
         if not row["admitted"]:
             raise RuntimeError(f"rejected candidate cannot reach aggregation: round={int(round_id)}, candidate={candidate}")
-        digest = _parameter_hash(parameters)
+        observed = canonical_parameters(parameters)
+        digest = parameter_hash(observed)
         if digest != row["submitted_model_sha256"]:
-            raise RuntimeError(f"admitted candidate differs from submitted snapshot: round={int(round_id)}, candidate={candidate}")
+            raise self._integrity_error(
+                self._round(round_id),
+                candidate,
+                current_node,
+                lifecycle_path,
+                row["submitted_model_sha256"],
+                digest,
+                row["_snapshot"],
+                observed,
+                transport_occurred,
+            )
         row["reached_aggregator_add_model"] = True
         row["aggregation_input_sha256"] = digest
         row["aggregation_matches_submitted_snapshot"] = True
         row["lifecycle_state"] = "aggregation_input_observed"
+
+    def submitted_hash(self, round_id: Any, candidate: str) -> str:
+        """Return authoritative canonical submission evidence for transport."""
+        return str(self._candidate(round_id, candidate, "read submitted hash")["submitted_model_sha256"])
+
+    @staticmethod
+    def _integrity_error(
+        round_number, candidate, current_node, path, expected_hash, observed_hash, expected, observed, transport_occurred
+    ) -> RuntimeError:
+        first = None
+        maximum = 0.0
+        expected_meta = observed_meta = None
+        if expected is not None:
+            for index, (left, right) in enumerate(zip(expected, observed, strict=False)):
+                expected_meta = f"shape={left.shape},dtype={left.dtype}"
+                observed_meta = f"shape={right.shape},dtype={right.dtype}"
+                if left.shape != right.shape or left.dtype != right.dtype:
+                    first = f"parameter[{index}]"
+                    break
+                unequal = np.argwhere(left != right)
+                if unequal.size:
+                    position = tuple(int(item) for item in unequal[0])
+                    first = f"parameter[{index}]{position}"
+                    maximum = max(maximum, float(np.max(np.abs(left.astype(np.float64) - right.astype(np.float64)))))
+                    break
+        return RuntimeError(
+            "candidate snapshot changed after submission (integrity failure): "
+            f"current_node={current_node}, candidate={candidate}, round={round_number}, path={path}, "
+            f"expected_hash={expected_hash}, observed_hash={observed_hash}, first_difference={first}, "
+            f"maximum_absolute_difference={maximum}, expected={expected_meta}, observed={observed_meta}, "
+            f"transport_occurred={transport_occurred}, lifecycle_state=submission_or_pre_aggregation"
+        )
 
     def publish_vote(self, round_id: Any, candidate: str, validator: str, decision: bool) -> None:
         """
@@ -211,25 +320,39 @@ class ValidatorSubgroupGate:
         return value
 
 
-_gate: ValidatorSubgroupGate | None = None
+_gate_policy: AdmissionPolicy | None = None
+_gates: dict[str, ValidatorSubgroupGate] = {}
 _registry_lock = threading.Lock()
 
 
 def install_validator_gate(gate: ValidatorSubgroupGate) -> None:
-    """Install the process-local gate used by real aggregation call sites."""
-    global _gate
+    """Install a policy whose ledgers are isolated for every node."""
+    global _gate_policy
     with _registry_lock:
-        _gate = gate
+        _gate_policy = gate.policy
+        _gates.clear()
 
 
-def get_validator_gate() -> ValidatorSubgroupGate | None:
+def get_validator_gate(node_id: str | None = None) -> ValidatorSubgroupGate | None:
     """Return the configured gate, if validation is enabled."""
     with _registry_lock:
-        return _gate
+        if _gate_policy is None:
+            return None
+        key = node_id or "legacy"
+        if key not in _gates:
+            _gates[key] = ValidatorSubgroupGate(_gate_policy)
+        return _gates[key]
+
+
+def validator_evidence() -> list[dict[str, Any]]:
+    """Return detached evidence from all node-local validation ledgers."""
+    with _registry_lock:
+        return [dict(row, current_node=node) for node, gate in sorted(_gates.items()) for row in gate.evidence()]
 
 
 def clear_validator_gate() -> None:
     """Remove experiment state during deterministic shutdown."""
-    global _gate
+    global _gate_policy
     with _registry_lock:
-        _gate = None
+        _gate_policy = None
+        _gates.clear()

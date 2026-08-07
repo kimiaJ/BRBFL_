@@ -88,12 +88,45 @@ class PartialModelCommand(Command):
                 model = self.laerner.get_model().build_copy(params=weights, num_samples=num_samples, contributors=list(contributors))
                 from brbfl.validation import get_validator_gate
 
-                gate = get_validator_gate()
+                gate = get_validator_gate(self.state.addr)
                 individual = len(contributors) == 1
-                admitted = not individual or gate is None or gate.submit_and_decide(round, contributors[0], model.get_parameters())
+                submission = model.additional_info.get("canonical_submission") if individual else None
+                expected_hash = None
+                if gate is not None and individual and submission is None:
+                    raise RuntimeError(
+                        f"missing canonical submission evidence: current_node={self.state.addr}, "
+                        f"round={round}, candidate={contributors[0]}, path=PartialModelCommand"
+                    )
+                if submission is not None:
+                    if submission.get("round") != int(round) or submission.get("candidate") != contributors[0]:
+                        raise RuntimeError(
+                            f"canonical submission identity mismatch: current_node={self.state.addr}, "
+                            f"round={round}, candidate={contributors[0]}, metadata={submission}"
+                        )
+                    expected_hash = submission.get("sha256")
+                admitted = (
+                    not individual
+                    or gate is None
+                    or gate.submit_and_decide(
+                        round,
+                        contributors[0],
+                        model.get_parameters(),
+                        current_node=self.state.addr,
+                        lifecycle_path="PartialModelCommand",
+                        expected_hash=expected_hash,
+                        transport_occurred=True,
+                    )
+                )
                 if admitted:
                     if gate is not None and individual:
-                        gate.observe_aggregation_input(round, contributors[0], model.get_parameters())
+                        gate.observe_aggregation_input(
+                            round,
+                            contributors[0],
+                            model.get_parameters(),
+                            current_node=self.state.addr,
+                            lifecycle_path="PartialModelCommand",
+                            transport_occurred=True,
+                        )
                     models_added = self.aggregator.add_model(model)
                 else:
                     models_added = self.aggregator.reject_model(list(contributors))
