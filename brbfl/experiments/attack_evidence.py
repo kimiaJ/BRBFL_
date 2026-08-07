@@ -197,9 +197,9 @@ def audit_partition(
         )
     elif attack_type == "backdoor":
         _validate_backdoor(node_id, before, after_snapshot, evidence, attack)
-    elif attack_type == "sign_flipping":
+    elif attack_type in {"sign_flipping", "free_rider"}:
         if evidence["image_changed_indices"] or evidence["label_changed_indices"]:
-            raise AssertionError(f"node-{node_id} sign flipping unexpectedly changed its dataset partition")
+            raise AssertionError(f"node-{node_id} {attack_type} unexpectedly changed its dataset partition")
         evidence.update({"samples_poisoned": 0, "source_partition_unchanged": True, "attack_application_count": 0})
         return evidence
     else:

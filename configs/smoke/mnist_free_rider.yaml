@@ -1,0 +1,23 @@
+nodes: 3
+rounds: 2
+epochs: 1
+seed: 666
+protocol: memory
+framework: pytorch
+aggregator: fedavg
+topology: full
+batch_size: 128
+show_metrics: false
+measure_time: false
+save_csv: true
+output_dir: results/free-rider-validation/attacked
+dataset:
+  name: p2pfl/MNIST
+  distribution: iid
+  reduced: true
+  partition_multiplier: 50
+attack:
+  name: free_rider
+  adversaries: [1]
+  parameters:
+    strategy: no_training_stale_current_model

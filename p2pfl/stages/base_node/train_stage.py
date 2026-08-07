@@ -72,7 +72,19 @@ class TrainStage(Stage):
             # Train
             logger.info(state.addr, "🏋️‍♀️ Training...")
             trace("local_training_started")
-            learner.fit()
+            training_begin = getattr(attack, "begin_local_training", None)
+            if training_begin is not None:
+                training_begin(state.round, learner.get_model().get_parameters())
+            skip_training = bool(getattr(attack, "should_skip_local_training", lambda: False)())
+            if not skip_training:
+                learner.fit()
+            else:
+                # A skipped fit must still set normal contribution metadata so
+                # FedAvg treats this node exactly like every other participant.
+                learner.get_model().set_contribution([state.addr], learner.get_data().get_num_samples())
+            training_complete = getattr(attack, "complete_local_training", None)
+            if training_complete is not None:
+                training_complete(learner.get_model().get_parameters(), skip_training)
             logger.info(state.addr, "🎓 Training done.")
             trace("local_training_completed")
             local_update_publisher = getattr(learner.get_model(), "publish_local_update", None)
@@ -103,6 +115,9 @@ class TrainStage(Stage):
             # Set aggregated model
             agg_model = aggregator.wait_and_get_aggregation()
             learner.set_model(agg_model)
+            global_observer = getattr(attack, "observe_global_model", None)
+            if global_observer is not None:
+                global_observer(learner.get_model().get_parameters())
 
             # Share that aggregation is done
             communication_protocol.broadcast(communication_protocol.build_msg(ModelsReadyCommand.get_name(), [], round=state.round))
