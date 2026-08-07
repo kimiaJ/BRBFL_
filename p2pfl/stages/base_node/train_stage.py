@@ -177,7 +177,6 @@ class TrainStage(Stage):
             agg_model = aggregator.wait_and_get_aggregation()
             learner.set_model(agg_model)
             installed_hash = parameter_hash(learner.get_model().get_parameters())
-            state.installed_model_hashes[int(state.round)] = installed_hash
             if gate is not None:
                 gate.observe_round_result(
                     state.round,
@@ -196,11 +195,33 @@ class TrainStage(Stage):
                     )
                 learner.get_model().additional_info["canonical_round_result"] = {
                     "round": int(state.round),
-                    "origin": state.addr,
+                    # Every independently aggregating trainer must emit the
+                    # same receipt.  The canonical origin is ownership of the
+                    # result, not necessarily the immediate gossip relay.
+                    "origin": min(state.train_set),
                     "contributors": contributors,
                     "aggregation_input_hashes": input_hashes,
                     "global_model_sha256": installed_hash,
                 }
+                receipt = learner.get_model().additional_info["canonical_round_result"]
+                state.record_aggregate_lifecycle(
+                    int(state.round),
+                    "aggregate_created",
+                    aggregate_origin=receipt["origin"],
+                    contributors=receipt["contributors"],
+                    expected_aggregate_hash=installed_hash,
+                    aggregation_input_hashes=receipt["aggregation_input_hashes"],
+                )
+                state.record_aggregate_lifecycle(
+                    int(state.round),
+                    "receipt_registered",
+                    aggregate_origin=receipt["origin"],
+                    contributors=receipt["contributors"],
+                    receipt_key=f"add_model:{state.round}:{receipt['origin']}:{installed_hash}",
+                    expected_aggregate_hash=installed_hash,
+                    receipt_present=True,
+                )
+            state.record_verified_installation(int(state.round), installed_hash)
             global_observer = getattr(attack, "observe_global_model", None)
             if global_observer is not None:
                 global_observer(learner.get_model().get_parameters())

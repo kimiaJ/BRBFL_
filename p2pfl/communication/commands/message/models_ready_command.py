@@ -51,7 +51,10 @@ class ModelsReadyCommand(Command):
         ########################################################
         if self.state.round is not None:
             if round in [self.state.round - 1, self.state.round]:
-                self.state.nei_status[source] = self.state.round
+                # Never promote a delayed round-N acknowledgement to N+1.  A
+                # trainer that has already advanced would otherwise conclude
+                # that this peer has round N+1 and omit its aggregate gossip.
+                self.state.nei_status[source] = max(self.state.nei_status.get(source, -1), round)
             else:
                 # Ignored
                 logger.error(
