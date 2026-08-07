@@ -47,6 +47,7 @@ from brbfl.experiments.manifest import write_manifest
 from brbfl.experiments.reproducibility import seed_everything
 from brbfl.experiments.round_evidence import assert_round_evidence, malicious_participants, triggered_round_metrics
 from brbfl.experiments.sign_flipping_evidence import AuditedModelUpdateAttack
+from brbfl.validation import AdmissionPolicy, ValidatorSubgroupGate, clear_validator_gate, install_validator_gate
 from p2pfl.communication.protocols.protobuff.grpc import GrpcCommunicationProtocol
 from p2pfl.communication.protocols.protobuff.memory import MemoryCommunicationProtocol
 from p2pfl.learning.aggregators.scaffold import Scaffold
@@ -323,6 +324,24 @@ def mnist(
     attack_name = config.attack.name
     attack_params = config.attack.parameters
     clear_attacks()
+    clear_validator_gate()
+    validator_gate = None
+    if config.validation.enabled:
+        byzantine = tuple(f"node-{index}" for index in adversary_indices) if attack_name == "byzantine_validator" else ()
+        validator_gate = ValidatorSubgroupGate(
+            AdmissionPolicy(
+                contributors=config.validation.contributors,
+                validators=config.validation.validators,
+                byzantine_validators=byzantine,
+                quorum=config.validation.quorum,
+                acceptance_threshold=config.validation.acceptance_threshold,
+                strategy=attack_params.get("strategy", "invert_reference_vote"),
+                group_id=attack_params.get("group_id"),
+                max_l2_norm=config.validation.max_l2_norm,
+                reference_reject_candidates=config.validation.reference_reject_candidates,
+            )
+        )
+        install_validator_gate(validator_gate)
     partition_audits = []
     model_update_audits = {}
     training_audits = {}
@@ -341,7 +360,7 @@ def mnist(
             original_model = model_fn()
             if evaluation_attack is not None:
                 original_model.model.backdoor_evaluation_attack = evaluation_attack
-            if i in adversary_indices and attack_name != "none":
+            if i in adversary_indices and attack_name not in {"none", "byzantine_validator"}:
                 attack_obj = create_attack(attack_name, attack_params)
                 partitions[i] = prepare_dataset(partitions[i], attack_obj)
                 if attack_name == "sign_flipping":
@@ -369,7 +388,9 @@ def mnist(
                 attack_type=attack_name,
                 before=original_partitions[i],
                 after=partitions[i],
-                malicious=i in adversary_indices and attack_name != "none",
+                # Byzantine validators are malicious only on the validation
+                # plane; their local dataset is deliberately benign.
+                malicious=i in adversary_indices and attack_name not in {"none", "byzantine_validator"},
                 attack=attack_obj,
             )
             partition_audits.append(partition_audit)
@@ -493,7 +514,7 @@ def mnist(
                             "global_model_after_aggregation_sha256" if free_rider_validation else "installed_global_model_sha256"
                         ],
                     }
-                    if free_rider_validation or collusion_validation
+                    if free_rider_validation or collusion_validation or validator_gate is not None
                     else {}
                 ),
                 "per_node_metrics": per_node_metrics,
@@ -579,6 +600,15 @@ def mnist(
                         "adversaries": adversary_indices,
                         "parameters": attack_params,
                     },
+                    "validation": {
+                        "enabled": config.validation.enabled,
+                        "contributors": list(config.validation.contributors),
+                        "validators": list(config.validation.validators),
+                        "quorum": config.validation.quorum,
+                        "acceptance_threshold": config.validation.acceptance_threshold,
+                        "max_l2_norm": config.validation.max_l2_norm,
+                        "reference_reject_candidates": list(config.validation.reference_reject_candidates),
+                    },
                 },
                 "configuration_path": (
                     f"configs/smoke/mnist_free_rider{'_clean' if attack_name == 'none' else ''}.yaml"
@@ -588,6 +618,7 @@ def mnist(
                     else None
                 ),
                 "attack_type": attack_name,
+                "validator_admission": validator_gate.evidence() if validator_gate is not None else [],
                 "attack_strategy": attack_params.get("strategy") if attack_name in {"free_rider", "collusion"} else None,
                 "seeds": {"experiment": config.seed, "partition": config.seed, "poisoning": attack_params.get("seed", config.seed)},
                 "lifecycle_stage": lifecycle_stage,
@@ -662,6 +693,17 @@ def mnist(
                 **(
                     {
                         "per_node_final_installed_model_hashes": {
+                            node.addr: parameter_hash(node.get_model().get_parameters()) for node in nodes
+                        },
+                        "final_model_consensus": len({parameter_hash(node.get_model().get_parameters()) for node in nodes}) == 1,
+                        "canonical_final_hash_source": "node-0 final installed global model",
+                    }
+                    if validator_gate is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "per_node_final_installed_model_hashes": {
                             node: audit.evidence_for_round(r - 1)["installed_global_model_sha256"]
                             for node, audit in training_audits.items()
                         },
@@ -712,6 +754,7 @@ def mnist(
                 pd.DataFrame(rows).to_csv("results/metrics_all_nodes.csv", index=False)
 
     finally:
+        clear_validator_gate()
         for node in nodes:
             node.stop()
         clear_attacks()

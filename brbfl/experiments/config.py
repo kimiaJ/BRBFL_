@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -24,6 +24,8 @@ class TopologyType(Enum):
 
 @dataclass(frozen=True)
 class DatasetConfig:
+    """Federated dataset and deterministic partition settings."""
+
     name: str = "p2pfl/MNIST"
     distribution: str = "iid"
     reduced: bool = False
@@ -32,13 +34,30 @@ class DatasetConfig:
 
 @dataclass(frozen=True)
 class AttackConfig:
+    """Attack selection and attack-specific parameters."""
+
     name: str = "none"
     adversaries: tuple[int, ...] = ()
     parameters: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
+class ValidationConfig:
+    """Optional pre-aggregation validator-subgroup policy."""
+
+    enabled: bool = False
+    contributors: tuple[str, ...] = ()
+    validators: tuple[str, ...] = ()
+    quorum: int = 0
+    acceptance_threshold: int = 0
+    max_l2_norm: float = float("inf")
+    reference_reject_candidates: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
+    """Complete runnable experiment settings."""
+
     nodes: int = 10
     rounds: int = 15
     epochs: int = 1
@@ -54,6 +73,7 @@ class ExperimentConfig:
     output_dir: str = "results/mnist"
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
     attack: AttackConfig = field(default_factory=AttackConfig)
+    validation: ValidationConfig = field(default_factory=ValidationConfig)
 
 
 def _topology(value: str | TopologyType) -> TopologyType:
@@ -67,6 +87,7 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
 
     dataset_raw = raw.get("dataset", {}) or {}
     attack_raw = raw.get("attack", {}) or {}
+    validation_raw = raw.get("validation", {}) or {}
 
     dataset = DatasetConfig(
         name=dataset_raw.get("name", DatasetConfig.name),
@@ -78,6 +99,15 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         name=attack_raw.get("name", AttackConfig.name),
         adversaries=tuple(attack_raw.get("adversaries", ()) or ()),
         parameters=dict(attack_raw.get("parameters", {}) or {}),
+    )
+    validation = ValidationConfig(
+        enabled=bool(validation_raw.get("enabled", False)),
+        contributors=tuple(validation_raw.get("contributors", ()) or ()),
+        validators=tuple(validation_raw.get("validators", ()) or ()),
+        quorum=int(validation_raw.get("quorum", 0)),
+        acceptance_threshold=int(validation_raw.get("acceptance_threshold", 0)),
+        max_l2_norm=float(validation_raw.get("max_l2_norm", float("inf"))),
+        reference_reject_candidates=tuple(validation_raw.get("reference_reject_candidates", ()) or ()),
     )
 
     return ExperimentConfig(
@@ -96,4 +126,5 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         output_dir=raw.get("output_dir", ExperimentConfig.output_dir),
         dataset=dataset,
         attack=attack,
+        validation=validation,
     )

@@ -47,6 +47,7 @@ class Aggregator(NodeComponent):
         """Initialize the aggregator."""
         self.__train_set: list[str] = []  # TODO: Remove the trainset from the state
         self.__models: list[P2PFLModel] = []
+        self.__rejected_contributors: set[str] = set()
 
         # Initialize instance's partial_aggregation based on the class's support
         self.partial_aggregation: bool = self.__class__.SUPPORTS_PARTIAL_AGGREGATION
@@ -113,6 +114,7 @@ class Aggregator(NodeComponent):
         with self.__agg_lock:
             self.__train_set = []
             self.__models = []
+            self.__rejected_contributors = set()
             self.__unhandled_models = []
             self._finish_aggregation_event.set()
 
@@ -128,6 +130,18 @@ class Aggregator(NodeComponent):
         for n in self.__models:
             models_added += n.get_contributors()
         return models_added
+
+    def reject_model(self, contributors: list[str]) -> list[str]:
+        """Mark a validation-rejected submission handled without aggregating it."""
+        with self.__agg_lock:
+            invalid = set(contributors) - set(self.__train_set)
+            if invalid:
+                raise ValueError(f"rejected contributors are not in the train set: {sorted(invalid)}")
+            self.__rejected_contributors.update(contributors)
+            handled = set(self.get_aggregated_models()) | self.__rejected_contributors
+            if len(handled) >= len(self.__train_set):
+                self._finish_aggregation_event.set()
+            return sorted(handled)
 
     def add_model(self, model: P2PFLModel) -> list[str]:
         """
@@ -171,7 +185,8 @@ class Aggregator(NodeComponent):
                     # logger.debug(self.addr, f"Models added: {self.get_aggregated_models()}")
 
                     # Check if all models were added
-                    if len(self.get_aggregated_models()) >= len(self.__train_set):
+                    handled = set(self.get_aggregated_models()) | self.__rejected_contributors
+                    if len(handled) >= len(self.__train_set):
                         self._finish_aggregation_event.set()
 
                     # Unlock and Return
