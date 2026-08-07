@@ -241,7 +241,7 @@ class P2PFLDataset:
             label_tag=label_tag,
             **kwargs,
         )
-        return [
+        partitions = [
             P2PFLDataset(
                 DatasetDict(
                     {
@@ -256,6 +256,17 @@ class P2PFLDataset:
             )
             for i in range(num_partitions)
         ]
+        for index, partition in enumerate(partitions):
+            # Preserve value-based source identities.  Hugging Face ``select``
+            # deliberately hides its indices behind an implementation-specific
+            # wrapper, so evidence must not inspect/repr that wrapper later.
+            partition._source_partition_indices = {
+                self._train_split_name: tuple(train_partition_idxs[index]),
+                self._test_split_name: tuple(test_partition_idxs[index]),
+            }
+            partition._partition_index = index
+            partition._partition_seed = seed
+        return partitions
 
     def export(
         self,

@@ -44,6 +44,7 @@ from brbfl.experiments.config import TopologyType as ConfigTopologyType
 from brbfl.experiments.datasets import partition_dataset
 from brbfl.experiments.free_rider_evidence import TrainingLifecycleAudit
 from brbfl.experiments.manifest import write_manifest
+from brbfl.experiments.partition_evidence import build_partition_manifest, build_provenance, dataset_identity
 from brbfl.experiments.reproducibility import seed_everything
 from brbfl.experiments.round_evidence import assert_round_evidence, malicious_participants, triggered_round_metrics
 from brbfl.experiments.sign_flipping_evidence import AuditedModelUpdateAttack
@@ -317,6 +318,8 @@ def mnist(
     data = P2PFLDataset.from_huggingface(config.dataset.name)
     source_labels_before = labels(data)
     partitions = partition_dataset(data, config)
+    controlled_dataset_identity = dataset_identity(data, config.dataset.name)
+    controlled_partition_manifest = build_partition_manifest(partitions, config, controlled_dataset_identity)
     original_partitions = [snapshot_partition(partition) for partition in partitions[:n]]
 
     nodes = []
@@ -670,7 +673,9 @@ def mnist(
                 "malicious_node_ids": configured_malicious,
                 "source_target_labels": {str(key): value for key, value in attack_params.get("flip_map", {}).items()},
                 "original_dataset_unchanged": labels(data) == source_labels_before,
-                "partitions": partition_audits,
+                "partitions": controlled_partition_manifest,
+                "partition_transformation_audits": partition_audits,
+                "provenance": build_provenance(config, controlled_dataset_identity, controlled_partition_manifest),
                 "per_node_poisoning_evidence": [
                     (
                         {

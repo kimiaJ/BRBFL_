@@ -80,16 +80,17 @@ class RandomIIDPartitionStrategy(DataPartitionStrategy):
                 - The second list contains lists of indices for the test data partitions.
 
         """
+        seed = kwargs.get("seed", Settings.general.SEED)
         return (
-            RandomIIDPartitionStrategy.__partition_data(train_data, num_partitions),
-            RandomIIDPartitionStrategy.__partition_data(test_data, num_partitions),
+            RandomIIDPartitionStrategy.__partition_data(train_data, num_partitions, seed),
+            RandomIIDPartitionStrategy.__partition_data(test_data, num_partitions, seed),
         )
 
     @staticmethod
-    def __partition_data(data: Dataset, num_partitions: int) -> list[list[int]]:
+    def __partition_data(data: Dataset, num_partitions: int, seed: int) -> list[list[int]]:
         # Shuffle the indices
         indices = list(range(len(data)))
-        random.Random(Settings.general.SEED).shuffle(indices)
+        random.Random(seed).shuffle(indices)
 
         # Get partition sizes
         samples_per_partition = len(data) // num_partitions

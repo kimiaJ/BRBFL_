@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from brbfl.experiments.partition_evidence import EVIDENCE_SCHEMA_VERSION, canonical_partition_manifest
+
 CONTROLLED_FIELDS = (
     "nodes",
     "rounds",
@@ -93,12 +95,50 @@ def _validate_run(name: str, evidence: dict[str, Any], rows: dict[tuple[int, str
 
 def compare_evidence(clean: dict[str, Any], attacked: dict[str, Any]) -> dict[str, Any]:
     """Prove vote inversion is the first cause and classify downstream differences."""
+    for name, evidence in (("clean", clean), ("attacked", attacked)):
+        provenance = evidence.get("provenance")
+        if not isinstance(provenance, dict):
+            raise AssertionError(f"{name} artifact lacks provenance/evidence schema; rerun both artifacts from the same commit")
+        schema = provenance.get("evidence_schema_version")
+        if schema != EVIDENCE_SCHEMA_VERSION:
+            raise AssertionError(
+                f"{name} artifact evidence schema is incompatible: expected={EVIDENCE_SCHEMA_VERSION!r}, actual={schema!r}, "
+                f"commit={provenance.get('producing_commit')!r}"
+            )
+    controlled_provenance = (
+        "producing_commit",
+        "controlled_configuration_sha256",
+        "dataset_identity",
+        "partitioning_strategy",
+        "configured_seeds",
+    )
+    for field in controlled_provenance:
+        if clean["provenance"].get(field) != attacked["provenance"].get(field):
+            raise AssertionError(f"controlled provenance differs: {field}")
     for field in CONTROLLED_FIELDS:
         if clean["configuration"].get(field) != attacked["configuration"].get(field):
             raise AssertionError(f"controlled configuration differs: {field}")
-    for field in ("seeds", "partitions"):
-        if clean.get(field) != attacked.get(field):
-            raise AssertionError(f"controlled {field} differ")
+    if clean.get("seeds") != attacked.get("seeds"):
+        raise AssertionError("controlled seeds differ")
+    clean_partitions = canonical_partition_manifest(clean.get("partitions"))
+    attack_partitions = canonical_partition_manifest(attacked.get("partitions"))
+    if clean_partitions != attack_partitions:
+        clean_rows = {(row["node_id"], row["split"]): row for row in clean_partitions["entries"]}
+        attack_rows = {(row["node_id"], row["split"]): row for row in attack_partitions["entries"]}
+        keys = sorted(clean_rows.keys() | attack_rows.keys())
+        first = next(key for key in keys if clean_rows.get(key) != attack_rows.get(key))
+        raise AssertionError(
+            f"controlled partitions differ at node/split={first}: clean={clean_rows.get(first)!r}, attacked={attack_rows.get(first)!r}"
+        )
+    for name, evidence, canonical in (
+        ("clean", clean, clean_partitions),
+        ("attacked", attacked, attack_partitions),
+    ):
+        recorded = evidence["provenance"].get("partition_manifest_sha256")
+        if recorded != canonical["sha256"]:
+            raise AssertionError(
+                f"{name} partition manifest provenance is stale or corrupt: recorded={recorded!r}, actual={canonical['sha256']!r}"
+            )
     clean_rounds, attack_rounds = _round_map(clean), _round_map(attacked)
     if clean_rounds.keys() != attack_rounds.keys():
         raise AssertionError("completed round identities differ")
@@ -205,6 +245,7 @@ def compare_evidence(clean: dict[str, Any], attacked: dict[str, Any]) -> dict[st
     return {
         "causal_status": "proven_byzantine_vote_inversion_changed_model_path",
         "controlled_pre_intervention_invariants": "valid",
+        "canonical_partition_manifest_sha256": clean_partitions["sha256"],
         "initial_model_sha256": next(iter(round_zero_parents)),
         "first_vote_difference": first_vote,
         "first_changed_admission": first_admission,
