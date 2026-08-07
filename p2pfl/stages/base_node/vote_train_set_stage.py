@@ -52,6 +52,10 @@ class VoteTrainSetStage(Stage):
             raise Exception("Invalid parameters on VoteTrainSetStage.")
 
         try:
+            # Arm result reception before voting.  Clearing this in the later
+            # wait stage loses a perfectly valid aggregate when trainers finish
+            # while a non-trainer is still leaving the election stage.
+            state.aggregated_model_event.clear()
             # Vote
             VoteTrainSetStage.__vote(trainset_size, state, communication_protocol, generator)
 

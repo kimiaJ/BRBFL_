@@ -176,6 +176,8 @@ class TrainStage(Stage):
             # Set aggregated model
             agg_model = aggregator.wait_and_get_aggregation()
             learner.set_model(agg_model)
+            installed_hash = parameter_hash(learner.get_model().get_parameters())
+            state.installed_model_hashes[int(state.round)] = installed_hash
             if gate is not None:
                 gate.observe_round_result(
                     state.round,
@@ -183,6 +185,22 @@ class TrainStage(Stage):
                     learner.get_model().get_contributors(),
                     canonical_hash_source=f"{state.addr} installed aggregate after wait_and_get_aggregation",
                 )
+                rows = [row for row in gate.evidence() if row["round"] == int(state.round)]
+                admitted_rows = sorted((row for row in rows if row["admitted"]), key=lambda row: row["candidate_node_id"])
+                contributors = sorted(learner.get_model().get_contributors())
+                input_hashes = {row["candidate_node_id"]: row["aggregation_input_sha256"] for row in admitted_rows}
+                if contributors != sorted(input_hashes):
+                    raise RuntimeError(
+                        "aggregate contributor set disagrees with admission decisions: "
+                        f"round={state.round}, node={state.addr}, contributors={contributors}, admitted={sorted(input_hashes)}"
+                    )
+                learner.get_model().additional_info["canonical_round_result"] = {
+                    "round": int(state.round),
+                    "origin": state.addr,
+                    "contributors": contributors,
+                    "aggregation_input_hashes": input_hashes,
+                    "global_model_sha256": installed_hash,
+                }
             global_observer = getattr(attack, "observe_global_model", None)
             if global_observer is not None:
                 global_observer(learner.get_model().get_parameters())

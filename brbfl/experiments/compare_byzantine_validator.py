@@ -62,6 +62,10 @@ def _lineage(round_row: dict[str, Any], round_number: int) -> dict[str, Any]:
 
 def _validate_run(name: str, evidence: dict[str, Any], rows: dict[tuple[int, str], dict[str, Any]]) -> dict[str, Any]:
     round_rows = _round_map(evidence)
+    participants = [f"node-{index}" for index in range(evidence["configuration"]["nodes"])]
+    final_hashes = evidence.get("per_node_final_installed_model_hashes", {})
+    if sorted(final_hashes) != participants or not evidence.get("final_model_consensus"):
+        raise AssertionError(f"{name} lacks complete network-wide final model consensus")
     integrity = []
     for key, row in sorted(rows.items()):
         parent = row.get("parent_global_model_sha256")
@@ -84,6 +88,16 @@ def _validate_run(name: str, evidence: dict[str, Any], rows: dict[tuple[int, str
             _fail(f"{name} round aggregation input differs from submission", key)
         integrity.append({"round": key[0], "candidate_node_id": key[1], "status": "valid"})
     for round_number in sorted(round_rows):
+        lineage = _lineage(round_rows[round_number], round_number)
+        installation = round_rows[round_number].get("round_installation", {})
+        installed = installation.get("installed_model_hashes", {})
+        if sorted(installation.get("installation_nodes", ())) != participants or sorted(installed) != participants:
+            raise AssertionError(f"{name} round {round_number} lacks every installation node")
+        if any(digest != lineage["installed_global_model_sha256"] for digest in installed.values()):
+            raise AssertionError(f"{name} round {round_number} has a stale or mismatched installed model")
+        configured = set(evidence["configuration"]["validation"]["contributors"])
+        if not set(lineage["contributors"]) <= configured:
+            raise AssertionError(f"{name} round {round_number} aggregation includes a non-contributor")
         if round_number == 0:
             continue
         previous = _lineage(round_rows[round_number - 1], round_number - 1)["installed_global_model_sha256"]
