@@ -38,6 +38,7 @@ import pandas as pd
 from brbfl.attacks import clear_attacks, create_attack, prepare_dataset, register_attack
 from brbfl.attacks.poisoned_model import PoisonedLightningModel
 from brbfl.experiments.attack_evidence import audit_partition, labels, parameter_hash, snapshot_partition, write_evidence
+from brbfl.experiments.collusion_evidence import CollusionLifecycleAudit, cosine, delta
 from brbfl.experiments.config import AttackConfig, DatasetConfig, ExperimentConfig, load_experiment_config
 from brbfl.experiments.config import TopologyType as ConfigTopologyType
 from brbfl.experiments.datasets import partition_dataset
@@ -87,6 +88,7 @@ def __parse_args() -> argparse.Namespace:
             "free_rider",
             "delay_drop",
             "colluding_backdoor",
+            "collusion",
         ],
         default="colluding_backdoor",
     )
@@ -325,6 +327,7 @@ def mnist(
     model_update_audits = {}
     training_audits = {}
     free_rider_validation = attack_name == "free_rider" or "free-rider-validation" in config.output_dir
+    collusion_validation = attack_name == "collusion" or "collusion-validation" in config.output_dir
     evaluation_attack = create_attack("backdoor", attack_params) if "target_class" in attack_params else None
     try:
         for i in range(n):
@@ -354,6 +357,11 @@ def mnist(
                     configured_batch_count=math.ceil(partitions[i].get_num_samples() / config.batch_size),
                 )
                 attack_obj.node_id = f"node-{i}"
+                training_audits[f"node-{i}"] = attack_obj
+            elif collusion_validation:
+                attack_obj = CollusionLifecycleAudit(
+                    attack_obj, f"node-{i}", e, math.ceil(partitions[i].get_num_samples() / config.batch_size)
+                )
                 training_audits[f"node-{i}"] = attack_obj
 
             partition_audit = audit_partition(
@@ -427,7 +435,7 @@ def mnist(
             if attack_name == "sign_flipping"
             else (
                 "local_training_control_after_model_acquisition_before_aggregation"
-                if free_rider_validation
+                if free_rider_validation or collusion_validation
                 else "dataset_preparation_after_partitioning_before_node_creation"
             )
         )
@@ -476,10 +484,10 @@ def mnist(
                             for node_id, audit in training_audits.items()
                         },
                         "global_model_sha256": training_audits["node-0"].evidence_for_round(round_number)[
-                            "global_model_after_aggregation_sha256"
+                            "global_model_after_aggregation_sha256" if free_rider_validation else "installed_global_model_sha256"
                         ],
                     }
-                    if free_rider_validation
+                    if free_rider_validation or collusion_validation
                     else {}
                 ),
                 "per_node_metrics": per_node_metrics,
@@ -488,6 +496,41 @@ def mnist(
                 evidence["attack_application_counts"] = {
                     node_id: audit.evidence_for_round(round_number)["free_rider_attack_application_count"]
                     for node_id, audit in training_audits.items()
+                }
+            if collusion_validation:
+                rows = evidence["per_node_training_evidence"]
+                colluders = [node for node in configured_malicious if node in participating_node_ids]
+                pairs = []
+                for left_index, left in enumerate(colluders):
+                    for right in colluders[left_index + 1 :]:
+                        left_audit, right_audit = training_audits[left].rounds[round_number], training_audits[right].rounds[round_number]
+                        pairs.append(
+                            {
+                                "nodes": [left, right],
+                                "genuine_cosine_similarity": cosine(left_audit["_genuine"], right_audit["_genuine"]),
+                                "submitted_cosine_similarity": cosine(
+                                    delta(left_audit["_pre"], left_audit["_submitted"]),
+                                    delta(right_audit["_pre"], right_audit["_submitted"]),
+                                ),
+                            }
+                        )
+                evidence["attack_application_counts"] = {node: row["attack_application_count"] for node, row in rows.items()}
+                evidence["collusion_group_evidence"] = {
+                    "all_participants": participating_node_ids,
+                    "malicious_participants": colluders,
+                    "benign_participants": [node for node in participating_node_ids if node not in colluders],
+                    "configured_collusion_group_members": [f"node-{i}" for i in attack_params.get("group_members", [])],
+                    "participating_colluders": colluders,
+                    "missing_configured_colluders": [
+                        f"node-{i}" for i in attack_params.get("group_members", []) if f"node-{i}" not in participating_node_ids
+                    ],
+                    "shared_direction_hashes_by_colluder": {node: rows[node]["shared_direction_sha256"] for node in colluders},
+                    "identical_shared_direction": len({rows[node]["shared_direction_sha256"] for node in colluders}) <= 1,
+                    "pairwise_updates": pairs,
+                    "benign_update_norms": {
+                        node: rows[node]["submitted_update_l2_norm"] for node in participating_node_ids if node not in colluders
+                    },
+                    "aggregation_receipts": {node: rows[node]["aggregation_receipt"] for node in participating_node_ids},
                 }
             assert_round_evidence(evidence, configured_malicious)
             round_evidence.append(evidence)
@@ -520,10 +563,14 @@ def mnist(
                     },
                 },
                 "configuration_path": (
-                    f"configs/smoke/mnist_free_rider{'_clean' if attack_name == 'none' else ''}.yaml" if free_rider_validation else None
+                    f"configs/smoke/mnist_free_rider{'_clean' if attack_name == 'none' else ''}.yaml"
+                    if free_rider_validation
+                    else f"configs/smoke/mnist_collusion{'_clean' if attack_name == 'none' else ''}.yaml"
+                    if collusion_validation
+                    else None
                 ),
                 "attack_type": attack_name,
-                "attack_strategy": attack_params.get("strategy") if attack_name == "free_rider" else None,
+                "attack_strategy": attack_params.get("strategy") if attack_name in {"free_rider", "collusion"} else None,
                 "seeds": {"experiment": config.seed, "partition": config.seed, "poisoning": attack_params.get("seed", config.seed)},
                 "lifecycle_stage": lifecycle_stage,
                 "malicious_node_ids": configured_malicious,
@@ -585,11 +632,30 @@ def mnist(
                             "source_dataset_unchanged": labels(data) == source_labels_before,
                         },
                     }
-                    if free_rider_validation
+                    if free_rider_validation or collusion_validation
                     else {}
                 ),
                 "rounds": round_evidence,
-                "final_model_sha256": parameter_hash(nodes[0].get_model().get_parameters()),
+                "final_model_sha256": (
+                    training_audits["node-0"].evidence_for_round(r - 1)["installed_global_model_sha256"]
+                    if collusion_validation
+                    else parameter_hash(nodes[0].get_model().get_parameters())
+                ),
+                **(
+                    {
+                        "per_node_final_installed_model_hashes": {
+                            node: audit.evidence_for_round(r - 1)["installed_global_model_sha256"]
+                            for node, audit in training_audits.items()
+                        },
+                        "final_model_consensus": len(
+                            {audit.evidence_for_round(r - 1)["installed_global_model_sha256"] for audit in training_audits.values()}
+                        )
+                        == 1,
+                        "canonical_final_hash_source": "node-0 final installed global model",
+                    }
+                    if collusion_validation
+                    else {}
+                ),
             },
         )
 

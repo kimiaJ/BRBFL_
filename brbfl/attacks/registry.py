@@ -46,6 +46,7 @@ ATTACK_REGISTRY: dict[str, AttackFactory] = {
     ),
     "sybil_backdoor": _construct("sybil_backdoor", "SybilBackdoorAttack", trigger_size=16, target_class=2, poison_rate=1.0),
     "free_rider": _construct("free_rider", "FreeRiderAttack", strategy="no_training_stale_current_model"),
+    "collusion": _construct("collusion", "CollusionAttack"),
     "delay_drop": _construct("delay_drop", "DelayDropAttack", mode="drop", drop_rate=0.8),
     "colluding_backdoor": _construct("colluding_backdoor", "ColludingBackdoorAttack", scale_factor=20, poison_rate=1.0, trigger_size=48),
 }
