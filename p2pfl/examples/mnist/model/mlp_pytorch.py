@@ -103,6 +103,9 @@ class MLP(L.LightningModule):
         y = batch["label"]
 
         attack = get_attack(getattr(self, "node_addr", None))
+        optimizer_step_recorder = getattr(attack, "record_optimizer_step", None)
+        if optimizer_step_recorder is not None:
+            optimizer_step_recorder()
         x, y = poison_training_batch((x, y), attack)
 
         logits = self(x)

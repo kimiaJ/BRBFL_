@@ -23,6 +23,7 @@
 # gprof2dot -f pstats Gossiper-10.pstat | dot -Tpng -o output.png && open output.png
 
 import argparse
+import math
 import os
 import re
 import time
@@ -40,6 +41,7 @@ from brbfl.experiments.attack_evidence import audit_partition, labels, parameter
 from brbfl.experiments.config import AttackConfig, DatasetConfig, ExperimentConfig, load_experiment_config
 from brbfl.experiments.config import TopologyType as ConfigTopologyType
 from brbfl.experiments.datasets import partition_dataset
+from brbfl.experiments.free_rider_evidence import TrainingLifecycleAudit
 from brbfl.experiments.manifest import write_manifest
 from brbfl.experiments.reproducibility import seed_everything
 from brbfl.experiments.round_evidence import assert_round_evidence, malicious_participants, triggered_round_metrics
@@ -321,6 +323,8 @@ def mnist(
     clear_attacks()
     partition_audits = []
     model_update_audits = {}
+    training_audits = {}
+    free_rider_validation = attack_name == "free_rider" or "free-rider-validation" in config.output_dir
     evaluation_attack = create_attack("backdoor", attack_params) if "target_class" in attack_params else None
     try:
         for i in range(n):
@@ -341,12 +345,22 @@ def mnist(
                     attack_obj = AuditedModelUpdateAttack(attack_obj, list(original_model.model.state_dict()))
                     model_update_audits[f"node-{i}"] = attack_obj
 
+            if free_rider_validation:
+                # Install a recorder on every node so the controlled clean run
+                # proves benign training using the identical protocol path.
+                attack_obj = TrainingLifecycleAudit(
+                    attack_obj,
+                    configured_epochs=e,
+                    configured_batch_count=math.ceil(partitions[i].get_num_samples() / config.batch_size),
+                )
+                training_audits[f"node-{i}"] = attack_obj
+
             partition_audit = audit_partition(
                 node_id=i,
                 attack_type=attack_name,
                 before=original_partitions[i],
                 after=partitions[i],
-                malicious=attack_obj is not None,
+                malicious=i in adversary_indices and attack_name != "none",
                 attack=attack_obj,
             )
             partition_audits.append(partition_audit)
@@ -410,7 +424,11 @@ def mnist(
         lifecycle_stage = (
             "local_update_publication_after_training_before_aggregation"
             if attack_name == "sign_flipping"
-            else "dataset_preparation_after_partitioning_before_node_creation"
+            else (
+                "local_training_control_after_model_acquisition_before_aggregation"
+                if free_rider_validation
+                else "dataset_preparation_after_partitioning_before_node_creation"
+            )
         )
         configured_malicious = [f"node-{i}" for i in adversary_indices]
         round_evidence = []
@@ -447,8 +465,29 @@ def mnist(
                     node_id: [event for event in audit.transmissions if event["round_id"] == str(round_number)]
                     for node_id, audit in model_update_audits.items()
                 },
+                **(
+                    {
+                        "per_node_training_evidence": {
+                            node_id: audit.evidence_for_round(round_number) for node_id, audit in training_audits.items()
+                        },
+                        "aggregation_input_hashes": {
+                            node_id: audit.evidence_for_round(round_number)["aggregation_input_sha256"]
+                            for node_id, audit in training_audits.items()
+                        },
+                        "global_model_sha256": training_audits["node-0"].evidence_for_round(round_number)[
+                            "global_model_after_aggregation_sha256"
+                        ],
+                    }
+                    if free_rider_validation
+                    else {}
+                ),
                 "per_node_metrics": per_node_metrics,
             }
+            if free_rider_validation:
+                evidence["attack_application_counts"] = {
+                    node_id: audit.evidence_for_round(round_number)["free_rider_attack_application_count"]
+                    for node_id, audit in training_audits.items()
+                }
             assert_round_evidence(evidence, configured_malicious)
             round_evidence.append(evidence)
 
@@ -462,9 +501,28 @@ def mnist(
                     "rounds": r,
                     "epochs": e,
                     "seed": config.seed,
+                    "protocol": config.protocol,
+                    "framework": config.framework,
+                    "aggregator": config.aggregator,
                     "topology": config.topology.value,
-                    "attack": attack_name,
+                    "batch_size": config.batch_size,
+                    "dataset": {
+                        "name": config.dataset.name,
+                        "distribution": config.dataset.distribution,
+                        "reduced": config.dataset.reduced,
+                        "partition_multiplier": config.dataset.partition_multiplier,
+                    },
+                    "attack": {
+                        "name": attack_name,
+                        "adversaries": adversary_indices,
+                        "parameters": attack_params,
+                    },
                 },
+                "configuration_path": (
+                    f"configs/smoke/mnist_free_rider{'_clean' if attack_name == 'none' else ''}.yaml" if free_rider_validation else None
+                ),
+                "attack_type": attack_name,
+                "attack_strategy": attack_params.get("strategy") if attack_name == "free_rider" else None,
                 "seeds": {"experiment": config.seed, "partition": config.seed, "poisoning": attack_params.get("seed", config.seed)},
                 "lifecycle_stage": lifecycle_stage,
                 "malicious_node_ids": configured_malicious,
@@ -516,6 +574,19 @@ def mnist(
                     }
                     for node_id, audit in model_update_audits.items()
                 },
+                **(
+                    {
+                        "zero_delta_tolerance": 0.0,
+                        "dataset_preservation": {
+                            "all_partitions_unchanged": all(row["source_partition_unchanged"] for row in partition_audits),
+                            "poisoned_sample_count": {row["node_id"]: 0 for row in partition_audits},
+                            "no_trigger_applied": True,
+                            "source_dataset_unchanged": labels(data) == source_labels_before,
+                        },
+                    }
+                    if free_rider_validation
+                    else {}
+                ),
                 "rounds": round_evidence,
                 "final_model_sha256": parameter_hash(nodes[0].get_model().get_parameters()),
             },

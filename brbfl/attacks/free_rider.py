@@ -1,22 +1,27 @@
-# attacks/free_rider.py
+"""No-training, stale-current-model free-rider attack."""
+
+from __future__ import annotations
+
+from typing import Any
+
 from .base import BaseAttack
-import numpy as np
-from typing import List
+
 
 class FreeRiderAttack(BaseAttack):
-    def __init__(self, mode="zero", scale=0.0):
-        """
-        mode: "zero" (send zero vector), "random", "scale" (multiply own update)
-        scale: only used in "scale" mode (e.g. 0.01 = very lazy)
-        """
-        self.mode = mode
-        self.scale = scale
-        super().__init__()
-    def manipulate_update(self, params: List[np.ndarray]) -> List[np.ndarray]:
-        if self.mode == "zero":
-            return [np.zeros_like(p) for p in params]
-        elif self.mode == "random":
-            return [np.random.randn(*p.shape) for p in params]
-        elif self.mode == "scale":
-            return [p * self.scale for p in params]
-        return params
+    """Keep participating while submitting the received round-start model."""
+
+    strategy = "no_training_stale_current_model"
+
+    def __init__(self, strategy: str = strategy) -> None:
+        """Validate the only controlled strategy supported by this milestone."""
+        if strategy != self.strategy:
+            raise ValueError(f"unsupported free-rider strategy: {strategy}")
+        super().__init__({"strategy": strategy})
+
+    def should_skip_local_training(self) -> bool:
+        """Explicitly request that the training stage perform no local fit."""
+        return True
+
+    def manipulate_update(self, parameters: Any, model: Any = None) -> Any:
+        """Return parameters unchanged; this attack never fabricates an update."""
+        return parameters
