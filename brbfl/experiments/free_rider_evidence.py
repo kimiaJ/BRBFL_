@@ -142,30 +142,50 @@ class TrainingLifecycleAudit:
         row["post_training_model_sha256"] = row["post_training_pre_submission_model_sha256"]
 
     def publish_update(self, parameters: list[Any]) -> list[Any]:
-        """Freeze evidence from the model actually installed for submission."""
+        """Select the parameters which the model publication path will install."""
         hook = getattr(self.attack, "publish_update", None)
         submitted = hook(parameters) if hook else parameters
-        detached = [np.asarray(value).copy() for value in submitted]
-        row = self.rounds[self.current_round]
+        return [np.asarray(value).copy() for value in submitted]
+
+    def record_submission(self, parameters: list[Any], round_id: Any) -> None:
+        """Record the immutable snapshot actually installed for publication."""
+        key = int(round_id)
+        row = self._row(key, "record submission")
+        if not row["local_training_finished"]:
+            raise self._lifecycle_error(key, "submission before training completion")
+        if row["submission_produced"]:
+            raise self._lifecycle_error(key, "submission already recorded")
+        detached = [np.asarray(value).copy() for value in parameters]
         row["submission_produced"] = True
         row["submitted_model_sha256"] = canonical_parameter_hash(detached)
+        row["_submitted"] = detached
         row.update(parameter_delta(row["_pre"], detached))
-        return detached
 
-    def observe_aggregation(self, parameters: list[Any]) -> None:
+    def observe_aggregation(self, parameters: list[Any], round_id: Any | None = None) -> None:
         """Observe the exact local snapshot immediately passed to add_model()."""
-        row = self.rounds[self.current_round]
-        aggregation_hash = canonical_parameter_hash(parameters)
+        key = self._canonical_round(round_id)
+        row = self._row(key, "observe aggregation")
+        if not row["submission_produced"]:
+            raise self._lifecycle_error(key, "aggregation observed before submission")
+        if row["submission_reached_aggregation"]:
+            raise self._lifecycle_error(key, "aggregation already observed")
+        aggregation_snapshot = [np.asarray(value).copy() for value in parameters]
+        aggregation_hash = canonical_parameter_hash(aggregation_snapshot)
         row["aggregation_input_sha256"] = aggregation_hash
         row["submission_reached_aggregation"] = True
         row["aggregation_matches_submitted_snapshot"] = aggregation_hash == row["submitted_model_sha256"]
+        row["aggregation_input_numerically_equals_submission"] = all(
+            np.array_equal(left, right) for left, right in zip(row["_submitted"], aggregation_snapshot, strict=True)
+        ) and len(row["_submitted"]) == len(aggregation_snapshot)
 
     def observe_global_model(self, parameters: list[Any]) -> None:
         """Record the model installed from real protocol aggregation."""
         row = self.rounds[self.current_round]
         if row["record_finalized"]:
             raise RuntimeError(f"audit record already finalized: node={self.node_id}, round={self.current_round}")
-        if not row["submission_reached_aggregation"] or not row["aggregation_matches_submitted_snapshot"]:
+        if not row["submission_reached_aggregation"]:
+            raise self._lifecycle_error(self.current_round, "finalization before aggregation observation")
+        if not row["aggregation_matches_submitted_snapshot"] or not row["aggregation_input_numerically_equals_submission"]:
             raise RuntimeError(f"submission was not observed at aggregation: node={self.node_id}, round={self.current_round}")
         if row["training_skipped"]:
             assert row["optimizer_step_count"] == row["effective_local_epochs"] == 0
@@ -175,6 +195,46 @@ class TrainingLifecycleAudit:
                 assert row["optimizer_step_count"] > 0
         row["global_model_after_aggregation_sha256"] = canonical_parameter_hash(parameters)
         row["record_finalized"] = True
+
+    def _canonical_round(self, round_id: Any | None) -> int:
+        """Return one integer round identity, rejecting a mismatched callback."""
+        key = int(self.current_round if round_id is None else round_id)
+        if self.current_round != key:
+            raise RuntimeError(f"audit round mismatch: node={self.node_id}, current_round={self.current_round}, requested_round={key}")
+        return key
+
+    def _row(self, key: int, operation: str) -> dict[str, Any]:
+        """Require initialization before any lifecycle observation."""
+        row = self.rounds.get(key)
+        if row is None:
+            raise RuntimeError(
+                f"cannot {operation} for uninitialized audit: node={self.node_id}, round={key}, "
+                f"current_state=uninitialized, available_evidence_keys=[]"
+            )
+        return row
+
+    def _lifecycle_error(self, key: int, reason: str) -> RuntimeError:
+        """Build a diagnostic validation error without leaking incidental KeyErrors."""
+        row = self.rounds[key]
+        state = (
+            "finalized"
+            if row["record_finalized"]
+            else "aggregation_observed"
+            if row["submission_reached_aggregation"]
+            else (
+                "submission_recorded"
+                if row["submission_produced"]
+                else "training_completed"
+                if row["local_training_finished"]
+                else "training"
+            )
+        )
+        return RuntimeError(
+            f"invalid training lifecycle ({reason}): node={self.node_id}, round={key}, current_state={state}, "
+            f"available_evidence_keys={sorted(k for k in row if not k.startswith('_'))}, "
+            f"training_completed={row['local_training_finished']}, submission_recorded={row['submission_produced']}, "
+            f"aggregation_previously_observed={row['submission_reached_aggregation']}"
+        )
 
     def evidence_for_round(self, round_id: Any) -> dict[str, Any]:
         """Return JSON-safe evidence without the private parameter snapshot."""
@@ -190,4 +250,5 @@ class TrainingLifecycleAudit:
             )
         row = dict(source)
         row.pop("_pre")
+        row.pop("_submitted")
         return row
