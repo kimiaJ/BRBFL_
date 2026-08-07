@@ -468,6 +468,7 @@ def mnist(
             )
         )
         configured_malicious = [f"node-{i}" for i in adversary_indices]
+        all_validator_evidence = validator_evidence() if validator_gate is not None else []
         round_evidence = []
         for round_number in range(r):
             per_node_metrics = [row for row in metric_rows if row["round"] == round_number]
@@ -544,6 +545,23 @@ def mnist(
                     "per_node_selection": role_rows,
                     "actual_training_nodes": actual_training,
                     "submitted_candidates": submitted,
+                }
+                owner_rows = [
+                    row
+                    for row in all_validator_evidence
+                    if row["round"] == round_number and row["current_node"] == row["candidate_node_id"]
+                ]
+                if len(owner_rows) != len(configured):
+                    raise RuntimeError(f"missing canonical candidate-owner evidence: round={round_number}")
+                result_hashes = {row.get("installed_global_model_sha256") for row in owner_rows}
+                contributor_sets = {tuple(row.get("round_aggregation_contributors", ())) for row in owner_rows}
+                if len(result_hashes) != 1 or None in result_hashes or len(contributor_sets) != 1:
+                    raise RuntimeError(f"candidate owners disagree on round aggregation lineage: round={round_number}")
+                evidence["aggregation_lineage"] = {
+                    "contributors": list(next(iter(contributor_sets))),
+                    "input_hashes": {row["candidate_node_id"]: row["aggregation_input_sha256"] for row in owner_rows if row["admitted"]},
+                    "installed_global_model_sha256": next(iter(result_hashes)),
+                    "canonical_hash_source": "consensus of contributor-owned installed models",
                 }
             if free_rider_validation:
                 evidence["attack_application_counts"] = {
@@ -645,7 +663,7 @@ def mnist(
                     else None
                 ),
                 "attack_type": attack_name,
-                "validator_admission": validator_evidence() if validator_gate is not None else [],
+                "validator_admission": all_validator_evidence,
                 "attack_strategy": attack_params.get("strategy") if attack_name in {"free_rider", "collusion"} else None,
                 "seeds": {"experiment": config.seed, "partition": config.seed, "poisoning": attack_params.get("seed", config.seed)},
                 "lifecycle_stage": lifecycle_stage,

@@ -20,6 +20,7 @@
 from typing import Any
 
 from brbfl.attacks import get_attack
+from brbfl.validation import parameter_hash
 from p2pfl.communication.commands.message.metrics_command import MetricsCommand
 from p2pfl.communication.commands.message.models_agregated_command import ModelsAggregatedCommand
 from p2pfl.communication.commands.message.models_ready_command import ModelsReadyCommand
@@ -80,6 +81,7 @@ class TrainStage(Stage):
 
             # Train
             logger.info(state.addr, "🏋️‍♀️ Training...")
+            parent_global_model_sha256 = parameter_hash(learner.get_model().get_parameters())
             trace("local_training_started")
             training_begin = getattr(attack, "begin_local_training", None)
             if training_begin is not None:
@@ -134,6 +136,7 @@ class TrainStage(Stage):
                 learner.get_model().get_parameters(),
                 current_node=state.addr,
                 lifecycle_path="TrainStage",
+                parent_global_model_sha256=parent_global_model_sha256,
             )
             if admitted:
                 if gate is not None:
@@ -142,6 +145,7 @@ class TrainStage(Stage):
                         "round": int(state.round),
                         "candidate": state.addr,
                         "sha256": gate.submitted_hash(state.round, state.addr),
+                        "parent_global_model_sha256": parent_global_model_sha256,
                     }
                     gate.observe_aggregation_input(
                         state.round,
@@ -172,6 +176,13 @@ class TrainStage(Stage):
             # Set aggregated model
             agg_model = aggregator.wait_and_get_aggregation()
             learner.set_model(agg_model)
+            if gate is not None:
+                gate.observe_round_result(
+                    state.round,
+                    learner.get_model().get_parameters(),
+                    learner.get_model().get_contributors(),
+                    canonical_hash_source=f"{state.addr} installed aggregate after wait_and_get_aggregation",
+                )
             global_observer = getattr(attack, "observe_global_model", None)
             if global_observer is not None:
                 global_observer(learner.get_model().get_parameters())

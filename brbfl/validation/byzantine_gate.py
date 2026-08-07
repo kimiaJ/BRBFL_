@@ -105,6 +105,7 @@ class ValidatorSubgroupGate:
         lifecycle_path: str = "unknown",
         expected_hash: str | None = None,
         transport_occurred: bool = False,
+        parent_global_model_sha256: str | None = None,
     ) -> bool:
         """Record an immutable submission and perform validation exactly once."""
         round_number = self._round(round_id)
@@ -190,6 +191,7 @@ class ValidatorSubgroupGate:
                 "round": round_number,
                 "candidate_node_id": candidate,
                 "submitted_model_sha256": submitted_hash,
+                "parent_global_model_sha256": parent_global_model_sha256,
                 "eligible_validators": list(self.policy.validators),
                 "received_validators": list(self.policy.validators),
                 "missing_validators": [],
@@ -212,6 +214,23 @@ class ValidatorSubgroupGate:
                 "_snapshot": snapshot,
             }
             return admitted
+
+    def observe_round_result(self, round_id: Any, parameters: list[Any], contributors: list[str], *, canonical_hash_source: str) -> None:
+        """Attach installed-model and exact aggregation lineage to every row in a round."""
+        round_number = self._round(round_id)
+        installed_hash = parameter_hash(parameters)
+        contributor_set = sorted(contributors)
+        inputs = {
+            candidate: row["aggregation_input_sha256"]
+            for (candidate_round, candidate), row in self._candidates.items()
+            if candidate_round == round_number and row["reached_aggregator_add_model"]
+        }
+        for (candidate_round, _candidate), row in self._candidates.items():
+            if candidate_round == round_number:
+                row["round_aggregation_contributors"] = contributor_set
+                row["round_aggregation_input_hashes"] = inputs
+                row["installed_global_model_sha256"] = installed_hash
+                row["canonical_hash_source"] = canonical_hash_source
 
     def observe_aggregation_input(
         self,
