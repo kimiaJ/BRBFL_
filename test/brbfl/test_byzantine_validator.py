@@ -273,6 +273,10 @@ def _comparison_fixture():
                         "installed_global_model_sha256": result,
                         "canonical_hash_source": "fixture",
                     },
+                    "round_installation": {
+                        "installation_nodes": [f"node-{index}" for index in range(5)],
+                        "installed_model_hashes": {f"node-{index}": result for index in range(5)},
+                    },
                 }
             )
             parent = result
@@ -297,7 +301,7 @@ def _comparison_fixture():
                 ]
             }
         )
-        return {
+        evidence = {
             "configuration": deepcopy(config),
             "seeds": {"experiment": 666, "partition": 666},
             "partitions": partitions,
@@ -314,7 +318,10 @@ def _comparison_fixture():
             "validator_admission": rows,
             "rounds": rounds,
             "final_model_sha256": parent,
+            "per_node_final_installed_model_hashes": {f"node-{index}": parent for index in range(5)},
+            "final_model_consensus": True,
         }
+        return evidence
 
     return build(False), build(True)
 

@@ -564,7 +564,26 @@ def mnist(
                     "contributors": list(next(iter(contributor_sets))),
                     "input_hashes": {row["candidate_node_id"]: row["aggregation_input_sha256"] for row in owner_rows if row["admitted"]},
                     "installed_global_model_sha256": next(iter(result_hashes)),
-                    "canonical_hash_source": "consensus of contributor-owned installed models",
+                    "canonical_hash_source": "verified deterministic aggregate installed by every network participant",
+                }
+                installed_by_node = {node.addr: node.state.installed_model_hashes.get(round_number) for node in nodes}
+                canonical_result = evidence["aggregation_lineage"]["installed_global_model_sha256"]
+                missing = sorted(node_id for node_id, digest in installed_by_node.items() if digest is None)
+                mismatched = {
+                    node_id: digest for node_id, digest in installed_by_node.items() if digest is not None and digest != canonical_result
+                }
+                if missing or mismatched:
+                    raise RuntimeError(
+                        "network-wide round installation failed: "
+                        f"round={round_number}, missing={missing}, mismatched={mismatched}, canonical={canonical_result}"
+                    )
+                evidence["round_installation"] = {
+                    "network_participants": sorted(participating),
+                    "installation_nodes": sorted(installed_by_node),
+                    "installed_model_hashes": installed_by_node,
+                    "all_active_nodes_installed_same_model": True,
+                    "round_transition_model_hashes": installed_by_node,
+                    "canonical_global_model_sha256": canonical_result,
                 }
             if free_rider_validation:
                 evidence["attack_application_counts"] = {

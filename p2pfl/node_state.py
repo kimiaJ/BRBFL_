@@ -64,6 +64,10 @@ class NodeState:
         # election over every reachable participant.
         self.eligible_trainers: tuple[str, ...] | None = None
         self.trainer_role_evidence: dict[int, dict[str, object]] = {}
+        # Verified round results installed by this participant.  This is node
+        # state (rather than experiment evidence) so non-trainers cannot advance
+        # a round merely because another node announced that aggregation ended.
+        self.installed_model_hashes: dict[int, str] = {}
 
         # Actual experiment
         self.experiment: Experiment | None = None
@@ -171,9 +175,11 @@ class NodeState:
         """Clear the state."""
         eligible_trainers = self.eligible_trainers
         trainer_role_evidence = self.trainer_role_evidence
+        installed_model_hashes = self.installed_model_hashes
         type(self).__init__(self, self.addr)
         self.eligible_trainers = eligible_trainers
         self.trainer_role_evidence = trainer_role_evidence
+        self.installed_model_hashes = installed_model_hashes
 
     def __str__(self) -> str:
         """Return a String representation of the node state."""

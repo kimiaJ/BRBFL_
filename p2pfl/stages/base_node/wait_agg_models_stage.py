@@ -41,8 +41,6 @@ class WaitAggregatedModelsStage(Stage):
         """Execute the stage."""
         if state is None or communication_protocol is None:
             raise Exception("Invalid parameters on WaitAggregatedModelsStage.")
-        # clear here instead of aquiring in vote_train_set_stage
-        state.aggregated_model_event.clear()
         logger.info(state.addr, "⏳ Waiting aggregation.")
         # Wait for aggregation to finish, if time over timeout log a warning message
         event_set = state.aggregated_model_event.wait(timeout=Settings.training.AGGREGATION_TIMEOUT)
@@ -51,8 +49,10 @@ class WaitAggregatedModelsStage(Stage):
             # The event was set before the timeout
             logger.info(state.addr, "✅ Aggregation event received.")
         else:
-            # The timeout occurred before the event was set
-            logger.warning(state.addr, "⏰ Aggregation timeout occurred.")
+            raise RuntimeError(f"aggregation timeout before verified model installation: round={state.round}, node={state.addr}")
+
+        if state.round not in state.installed_model_hashes:
+            raise RuntimeError(f"aggregation event without verified installation: round={state.round}, node={state.addr}")
 
         # Get aggregated model
         logger.debug(

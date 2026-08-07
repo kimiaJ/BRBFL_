@@ -20,6 +20,7 @@
 
 from collections.abc import Callable
 
+from brbfl.validation import get_validator_gate, parameter_hash
 from p2pfl.communication.commands.command import Command
 from p2pfl.learning.aggregators.aggregator import Aggregator
 from p2pfl.learning.frameworks.exceptions import DecodingParamsError, ModelNotMatchingError
@@ -63,13 +64,47 @@ class FullModelCommand(Command):
                     f"Model reception in a late round ({round} != {self.state.round}).",
                 )
                 return
-            if self.state.aggregated_model_event.is_set():
-                logger.debug(self.state.addr, "😲 Aggregated model not expected.")
-                return
             try:
                 logger.info(self.state.addr, "📦 Aggregated model received.")
-                # Decode and set model
-                self.learner.set_model(weights)
+                # Decode into a detached copy first: malformed metadata or a
+                # mutated payload must never alter the installed learner.
+                model = self.learner.get_model().build_copy(params=weights)
+                receipt = model.additional_info.get("canonical_round_result")
+                gate = get_validator_gate(self.state.addr)
+                if gate is not None:
+                    if not isinstance(receipt, dict):
+                        raise RuntimeError("aggregate lacks canonical round-result receipt")
+                    contributors = sorted(receipt.get("contributors", ()))
+                    input_hashes = receipt.get("aggregation_input_hashes")
+                    digest = parameter_hash(model.get_parameters())
+                    if receipt.get("round") != int(round):
+                        raise RuntimeError(f"aggregate round mismatch: message={round}, receipt={receipt.get('round')}")
+                    if source != receipt.get("origin") or source not in self.state.train_set:
+                        raise RuntimeError(f"aggregate origin is not a selected trainer: source={source}")
+                    if contributors != sorted(input_hashes or {}) or not set(contributors) <= set(gate.policy.contributors):
+                        raise RuntimeError("aggregate contributor set/input hashes are inconsistent with contributor policy")
+                    if digest != receipt.get("global_model_sha256"):
+                        raise RuntimeError(
+                            f"aggregate parameter hash mismatch: transmitted={receipt.get('global_model_sha256')}, decoded={digest}"
+                        )
+                    previous = self.state.installed_model_hashes.get(int(round))
+                    if previous is not None:
+                        if previous != digest:
+                            raise RuntimeError(f"conflicting duplicate aggregate: round={round}")
+                        self.state.aggregated_model_event.set()
+                        return
+                self.learner.set_model(model)
+                installed = parameter_hash(self.learner.get_model().get_parameters())
+                if gate is not None and installed != receipt["global_model_sha256"]:
+                    raise RuntimeError("installed learner parameters differ from verified aggregate")
+                self.state.installed_model_hashes[int(round)] = installed
+                if gate is not None:
+                    gate.observe_round_result(
+                        round,
+                        self.learner.get_model().get_parameters(),
+                        receipt["contributors"],
+                        canonical_hash_source=f"verified aggregate from {source}",
+                    )
                 # Release here caused the simulation to crash before
                 self.state.aggregated_model_event.set()
 
