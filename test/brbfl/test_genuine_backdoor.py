@@ -10,8 +10,10 @@ import torch
 from datasets import Dataset, DatasetDict, Features, Image, Value, load_from_disk
 from PIL import Image as PILImage
 
+from brbfl.attacks import create_attack
 from brbfl.attacks.backdoor import BackdoorAttack
 from brbfl.evaluation.metrics import MNISTTrigger, apply_mnist_trigger, triggered_asr_counts
+from brbfl.experiments.attack_evidence import audit_partition, snapshot_partition
 from brbfl.experiments.compare_backdoor import compare_evidence
 from p2pfl.learning.dataset.p2pfl_dataset import P2PFLDataset
 
@@ -96,6 +98,83 @@ def test_fraction_relabeling_source_copy_and_deterministic_evidence():
         else:
             np.testing.assert_array_equal(after, before)
             assert poisoned._data["train"][index]["label"] == source._data["train"][index]["label"]
+
+
+def test_attack_aware_audit_handles_target_class_and_distinct_change_sets():
+    source = partition()
+    before = snapshot_partition(source)
+    # This deterministic selection contains index 2, whose original label is already the target.
+    attack = BackdoorAttack(poison_rate=0.5, target_class=2, seed=0)
+    poisoned = attack.poison_data(source)
+    evidence = audit_partition(node_id=1, attack_type="backdoor", before=before, after=poisoned, malicious=True, attack=attack)
+
+    assert 2 in evidence["poisoned_indices"]
+    assert 2 in evidence["image_changed_indices"]
+    assert 2 not in evidence["label_changed_indices"]
+    assert evidence["poisoned_indices"] == evidence["image_changed_indices"]
+    assert set(evidence["label_changed_indices"]) < set(evidence["image_changed_indices"])
+    assert evidence["resulting_labels_at_poisoned_indices"] == [2] * 5
+    assert evidence["trigger_validation_passed"]
+    assert evidence["non_trigger_pixels_preserved"]
+    assert evidence["source_partition_unchanged"]
+    assert source._data["train"][2]["label"] == 2
+
+
+def _replace_train(dataset, transform):
+    data = DatasetDict(dict(dataset._data))
+    data[dataset._train_split_name] = data[dataset._train_split_name].map(transform, with_indices=True)
+    return P2PFLDataset(data)
+
+
+@pytest.mark.parametrize(
+    ("tamper", "message"),
+    [
+        ("label", "does not match all-to-one replacement|does not equal target label"),
+        ("trigger", "missing or malformed trigger|image changes do not match poisoned indices"),
+        ("outside", "outside the trigger"),
+    ],
+)
+def test_backdoor_audit_rejects_semantically_invalid_poisoning(tamper, message):
+    source = partition()
+    before = snapshot_partition(source)
+    attack = BackdoorAttack(poison_rate=0.4, target_class=9, seed=12)
+    poisoned = attack.poison_data(source)
+    selected = attack.poisoning_evidence["changed_image_indices"][0]
+
+    def corrupt(row, index):
+        if index != selected:
+            return row
+        changed = dict(row)
+        if tamper == "label":
+            changed["label"] = 8
+        else:
+            image = np.asarray(row["image"]).copy()
+            image[27, 27] = 0 if tamper == "trigger" else image[27, 27]
+            if tamper == "outside":
+                image[0, 0] += 0.25
+            changed["image"] = image
+        return changed
+
+    corrupted = _replace_train(poisoned, corrupt)
+    with pytest.raises(AssertionError, match=message):
+        audit_partition(node_id=1, attack_type="backdoor", before=before, after=corrupted, malicious=True, attack=attack)
+
+
+def test_backdoor_audit_rejects_wrong_attack_dispatch():
+    source = partition()
+    before = snapshot_partition(source)
+    backdoor = BackdoorAttack(poison_rate=0.3, seed=12)
+    poisoned = backdoor.poison_data(source)
+    label_attack = create_attack("label_flipping", {"flip_map": {1: 7}})
+    with pytest.raises(AssertionError, match="label flipping changed images"):
+        audit_partition(
+            node_id=1,
+            attack_type="label_flipping",
+            before=before,
+            after=poisoned,
+            malicious=True,
+            attack=label_attack,
+        )
 
 
 def test_benign_partition_is_unchanged_when_only_node_one_is_poisoned():
