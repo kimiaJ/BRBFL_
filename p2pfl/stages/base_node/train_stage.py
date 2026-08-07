@@ -94,8 +94,10 @@ class TrainStage(Stage):
             logger.info(state.addr, "🎓 Training done.")
             trace("local_training_completed")
             local_update_publisher = getattr(learner.get_model(), "publish_local_update", None)
-            if local_update_publisher is not None:
-                local_update_publisher()
+            submitted_parameters = local_update_publisher() if local_update_publisher is not None else learner.get_model().get_parameters()
+            submission_recorder = getattr(attack, "record_submission", None)
+            if submission_recorder is not None:
+                submission_recorder(submitted_parameters, state.round)
 
             check_early_stop(state)
 
