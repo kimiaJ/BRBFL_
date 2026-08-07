@@ -38,7 +38,7 @@ import pandas as pd
 from brbfl.attacks import clear_attacks, create_attack, prepare_dataset, register_attack
 from brbfl.attacks.poisoned_model import PoisonedLightningModel
 from brbfl.experiments.attack_evidence import audit_partition, labels, parameter_hash, snapshot_partition, write_evidence
-from brbfl.experiments.collusion_evidence import CollusionLifecycleAudit, cosine, delta
+from brbfl.experiments.collusion_evidence import CollusionLifecycleAudit, completed_collusion_rows, cosine, delta
 from brbfl.experiments.config import AttackConfig, DatasetConfig, ExperimentConfig, load_experiment_config
 from brbfl.experiments.config import TopologyType as ConfigTopologyType
 from brbfl.experiments.datasets import partition_dataset
@@ -382,9 +382,15 @@ def mnist(
                 addr=address,
                 aggregator=Scaffold() if config.aggregator == "scaffold" else None,
             )
+            # Memory addresses acquire a suffix when another experiment has run
+            # in this process.  The registry and serialized model must use the
+            # canonical address returned by the protocol, not the requested
+            # base name.
+            model_to_use.node_addr = node.addr
+            model_to_use.model.node_addr = node.addr
             node.start()
             if attack_obj is not None:
-                register_attack(address, attack_obj)
+                register_attack(node.addr, attack_obj)
                 attack_obj.on_attach(node)
             logger.info(node.addr, f"node: {i}")
             node_attack = attack_name if i in adversary_indices else "N/A"
@@ -499,10 +505,20 @@ def mnist(
                 }
             if collusion_validation:
                 rows = evidence["per_node_training_evidence"]
-                colluders = [node for node in configured_malicious if node in participating_node_ids]
+                configured_colluders = [f"node-{i}" for i in attack_params.get("group_members", [])]
+                completed_rows, colluders, missing_colluders = completed_collusion_rows(
+                    training_audits, configured_colluders, participating_node_ids, round_number
+                )
+                completed_colluders = list(completed_rows)
+                if attack_name == "collusion" and len(completed_colluders) < 2:
+                    raise RuntimeError(
+                        f"controlled attacked round requires at least two completed colluders: round={round_number}, "
+                        f"configured_colluders={configured_colluders}, participating_colluders={colluders}, "
+                        f"completed_colluders={completed_colluders}, missing_configured_colluders={missing_colluders}"
+                    )
                 pairs = []
-                for left_index, left in enumerate(colluders):
-                    for right in colluders[left_index + 1 :]:
+                for left_index, left in enumerate(completed_colluders):
+                    for right in completed_colluders[left_index + 1 :]:
                         left_audit, right_audit = training_audits[left].rounds[round_number], training_audits[right].rounds[round_number]
                         pairs.append(
                             {
@@ -519,13 +535,15 @@ def mnist(
                     "all_participants": participating_node_ids,
                     "malicious_participants": colluders,
                     "benign_participants": [node for node in participating_node_ids if node not in colluders],
-                    "configured_collusion_group_members": [f"node-{i}" for i in attack_params.get("group_members", [])],
+                    "configured_collusion_group_members": configured_colluders,
                     "participating_colluders": colluders,
-                    "missing_configured_colluders": [
-                        f"node-{i}" for i in attack_params.get("group_members", []) if f"node-{i}" not in participating_node_ids
-                    ],
-                    "shared_direction_hashes_by_colluder": {node: rows[node]["shared_direction_sha256"] for node in colluders},
-                    "identical_shared_direction": len({rows[node]["shared_direction_sha256"] for node in colluders}) <= 1,
+                    "completed_colluders": completed_colluders,
+                    "missing_configured_colluders": missing_colluders,
+                    "shared_direction_hashes_by_colluder": {
+                        node: completed_rows[node]["shared_direction_sha256"] for node in completed_colluders
+                    },
+                    "identical_shared_direction": len({completed_rows[node]["shared_direction_sha256"] for node in completed_colluders})
+                    <= 1,
                     "pairwise_updates": pairs,
                     "benign_update_norms": {
                         node: rows[node]["submitted_update_l2_norm"] for node in participating_node_ids if node not in colluders

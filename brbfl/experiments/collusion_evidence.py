@@ -34,6 +34,68 @@ def cosine(left: Sequence[Any], right: Sequence[Any]) -> float:
     return float(dot / (a * b))
 
 
+COLLUDER_REQUIRED_KEYS = {
+    "genuine_post_training_model_sha256",
+    "shared_direction_sha256",
+    "submitted_model_sha256",
+    "aggregation_input_sha256",
+}
+
+
+def completed_collusion_rows(
+    audits: dict[str, CollusionLifecycleAudit], configured_colluders: Sequence[str], participants: Sequence[str], round_id: int
+) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
+    """Return finalized participating colluders, distinguishing absence from broken lifecycle."""
+    participating = [node for node in configured_colluders if node in participants]
+    missing = [node for node in configured_colluders if node not in participants]
+    completed: dict[str, dict[str, Any]] = {}
+    for node in participating:
+        audit = audits.get(node)
+        raw = None if audit is None else audit.rounds.get(int(round_id))
+        available = [] if raw is None else sorted(key for key in raw if not key.startswith("_"))
+        lifecycle_missing = set(COLLUDER_REQUIRED_KEYS)
+        if raw is not None:
+            lifecycle_missing -= raw.keys()
+        finalized = bool(raw and raw.get("record_finalized"))
+        valid = bool(
+            raw
+            and raw.get("local_training_finished")
+            and raw.get("attack_application_count") == 1
+            and raw.get("submission_produced")
+            and raw.get("submission_reached_aggregation")
+            and finalized
+            and not lifecycle_missing
+        )
+        if not valid:
+            state = (
+                "uninitialized"
+                if raw is None
+                else (
+                    "finalized"
+                    if finalized
+                    else "aggregation_observed"
+                    if raw.get("submission_reached_aggregation")
+                    else "submitted"
+                    if raw.get("submission_produced")
+                    else "attacked"
+                    if raw.get("attack_application_count")
+                    else "trained"
+                    if raw.get("local_training_finished")
+                    else "initialized"
+                )
+            )
+            raise RuntimeError(
+                "incomplete participating colluder evidence: "
+                f"node={node}, round={int(round_id)}, configured=True, participant=True, completed=False, "
+                f"lifecycle_state={state}, available_keys={available}, missing_required_keys={sorted(lifecycle_missing)}, "
+                f"attack_application_count={0 if raw is None else raw.get('attack_application_count', 0)}, "
+                f"submission_recorded={bool(raw and raw.get('submission_produced'))}, "
+                f"aggregation_observed={bool(raw and raw.get('submission_reached_aggregation'))}, finalized={finalized}"
+            )
+        completed[node] = audit.evidence_for_round(round_id)
+    return completed, participating, missing
+
+
 class CollusionLifecycleAudit:
     """Narrow post-fit hook proving training precedes one coordinated transform."""
 
