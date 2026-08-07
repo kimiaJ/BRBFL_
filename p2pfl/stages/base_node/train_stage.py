@@ -70,7 +70,7 @@ class TrainStage(Stage):
                 )
 
             # Set Models To Aggregate
-            aggregator.set_nodes_to_aggregate(state.train_set)
+            aggregator.set_nodes_to_aggregate(state.train_set, round_id=state.round)
 
             check_early_stop(state)
 
@@ -146,7 +146,11 @@ class TrainStage(Stage):
                 admitted_contributors = list(
                     wait_for_admitted_contributors(int(state.round), timeout=Settings.training.AGGREGATION_TIMEOUT)
                 )
-                aggregator.set_admitted_contributors(admitted_contributors)
+                # The completed admission ledger is the single owner of the
+                # configured-candidate -> expected-model transition.  In
+                # particular, a rejected local candidate must not be rejected
+                # a second time below after this narrows the expected set.
+                aggregator.finalize_admitted_contributors(int(state.round), list(state.train_set), admitted_contributors)
                 state.expected_aggregation_models[int(state.round)] = tuple(admitted_contributors)
                 state.trainer_role_evidence[int(state.round)]["expected_aggregation_models"] = admitted_contributors
             if admitted:
@@ -167,8 +171,12 @@ class TrainStage(Stage):
                         transport_occurred=False,
                     )
                 models_added = aggregator.add_model(learner.get_model())
-            else:
+            elif gate is None:
                 models_added = aggregator.reject_model([state.addr])
+            else:
+                # Finalization above already excluded this candidate.  Keep the
+                # node in the workflow so it can install the admitted result.
+                models_added = aggregator.get_aggregated_models()
             state.trainer_role_evidence[int(state.round)]["submitted_candidate"] = True
 
             # send model added msg ---->> redundant (a node always owns its model)
