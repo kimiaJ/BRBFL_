@@ -8,7 +8,7 @@ from datasets import Dataset, DatasetDict
 from brbfl.attacks.collusion import CollusionAttack
 from brbfl.attacks.registry import create_attack
 from brbfl.experiments.attack_evidence import audit_partition, snapshot_partition
-from brbfl.experiments.collusion_evidence import CollusionLifecycleAudit, cosine, delta
+from brbfl.experiments.collusion_evidence import CollusionLifecycleAudit, completed_collusion_rows, cosine, delta
 from brbfl.experiments.config import load_experiment_config
 from p2pfl.learning.dataset.p2pfl_dataset import P2PFLDataset
 
@@ -143,3 +143,50 @@ def test_benign_never_applies_attack():
     audit = CollusionLifecycleAudit(None, "node-0", 1, 1)
     complete(audit, [np.zeros(1)], [np.ones(1)])
     assert audit.evidence_for_round(0)["attack_application_count"] == 0
+
+
+def test_completed_rows_distinguish_configured_participating_and_completed():
+    before = [np.zeros(2, dtype=np.float32)]
+    left = CollusionLifecycleAudit(attack(), "node-1", 1, 1)
+    complete(left, before, [np.ones(2, dtype=np.float32)])
+
+    rows, participating, missing = completed_collusion_rows({"node-1": left}, ["node-1", "node-2"], ["node-0", "node-1"], 0)
+
+    assert list(rows) == participating == ["node-1"]
+    assert missing == ["node-2"]
+    assert rows["node-1"]["shared_direction_sha256"]
+
+
+@pytest.mark.parametrize(
+    ("finish", "missing_key", "message"),
+    [
+        (False, None, "finalized=False"),
+        (True, "shared_direction_sha256", "shared_direction_sha256"),
+    ],
+)
+def test_participating_colluder_incomplete_evidence_fails_descriptively(finish, missing_key, message):
+    audit = CollusionLifecycleAudit(attack(), "node-1", 1, 1)
+    audit.begin_local_training(0, [np.zeros(1)])
+    if finish:
+        audit.record_optimizer_steps(1)
+        audit.complete_local_training([np.ones(1)], False)
+        submitted = audit.publish_update([np.ones(1)])
+        audit.record_submission(submitted, 0)
+        audit.observe_aggregation(submitted)
+        audit.observe_global_model(submitted)
+        del audit.rounds[0][missing_key]
+
+    with pytest.raises(RuntimeError, match=message) as error:
+        completed_collusion_rows({"node-1": audit}, ["node-1"], ["node-1"], 0)
+    text = str(error.value)
+    assert "node=node-1, round=0" in text
+    assert "participant=True, completed=False" in text
+    assert "available_keys=" in text and "attack_application_count=" in text
+
+
+def test_clean_and_benign_rows_need_no_collusion_fields():
+    benign = CollusionLifecycleAudit(None, "node-0", 1, 1)
+    complete(benign, [np.zeros(1)], [np.ones(1)])
+    row = benign.evidence_for_round(0)
+    assert "shared_direction_sha256" not in row
+    assert completed_collusion_rows({"node-0": benign}, [], ["node-0"], 0) == ({}, [], [])

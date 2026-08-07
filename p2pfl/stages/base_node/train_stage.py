@@ -93,8 +93,18 @@ class TrainStage(Stage):
                 training_complete(learner.get_model().get_parameters(), skip_training)
             logger.info(state.addr, "🎓 Training done.")
             trace("local_training_completed")
-            local_update_publisher = getattr(learner.get_model(), "publish_local_update", None)
-            submitted_parameters = local_update_publisher() if local_update_publisher is not None else learner.get_model().get_parameters()
+            # Lifecycle attacks are owned by the node process.  A fitted model may
+            # have made a Ray round trip, so do not make the canonical audit
+            # depend on a registry lookup made through that returned object.
+            attack_publisher = getattr(attack, "publish_update", None)
+            if attack_publisher is not None:
+                submitted_parameters = attack_publisher(learner.get_model().get_parameters())
+                learner.get_model().set_parameters(submitted_parameters)
+            else:
+                local_update_publisher = getattr(learner.get_model(), "publish_local_update", None)
+                submitted_parameters = (
+                    local_update_publisher() if local_update_publisher is not None else learner.get_model().get_parameters()
+                )
             submission_recorder = getattr(attack, "record_submission", None)
             if submission_recorder is not None:
                 submission_recorder(submitted_parameters, state.round)
