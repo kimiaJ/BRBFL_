@@ -164,3 +164,36 @@ def test_median_simple():
 def test_median_complex():
     raise NotImplementedError
 """
+
+
+def test_admitted_set_is_the_only_aggregation_readiness_boundary():
+    """A final rejection immediately removes a selected trainer from readiness."""
+    aggregator = FedAvg()
+    aggregator.set_addr("node-1")
+    aggregator.set_nodes_to_aggregate(["node-0", "node-1", "node-2"])
+    node_1 = P2PFLModelMock(None, params=[np.array([1.0])], num_samples=1, contributors=["node-1"])
+    node_2 = P2PFLModelMock(None, params=[np.array([2.0])], num_samples=1, contributors=["node-2"])
+    aggregator.add_model(node_1)
+    aggregator.add_model(node_2)
+
+    aggregator.set_admitted_contributors(["node-1", "node-2"])
+
+    assert aggregator.get_expected_aggregation_models() == {"node-1", "node-2"}
+    assert aggregator.get_missing_models() == set()
+    assert aggregator._finish_aggregation_event.is_set()
+    assert set(aggregator.wait_and_get_aggregation(timeout=0).get_contributors()) == {"node-1", "node-2"}
+
+
+def test_models_received_before_final_admission_are_filtered_not_discarded():
+    """Keep early admitted models and exclude an early model later rejected."""
+    aggregator = FedAvg()
+    aggregator.set_addr("node-2")
+    aggregator.set_nodes_to_aggregate(["node-0", "node-1", "node-2"])
+    for node in ("node-0", "node-1", "node-2"):
+        aggregator.add_model(P2PFLModelMock(None, params=[np.array([1.0])], num_samples=1, contributors=[node]))
+
+    aggregator.set_admitted_contributors(["node-1", "node-2"])
+
+    assert set(aggregator.get_aggregated_models()) == {"node-1", "node-2"}
+    assert "node-0" not in aggregator.get_expected_aggregation_models()
+    assert aggregator.get_missing_models() == set()

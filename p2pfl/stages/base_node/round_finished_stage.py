@@ -24,6 +24,7 @@ from p2pfl.learning.aggregators.aggregator import Aggregator
 from p2pfl.learning.frameworks.learner import Learner
 from p2pfl.management.logger import logger
 from p2pfl.node_state import NodeState
+from p2pfl.settings import Settings
 from p2pfl.stages.stage import Stage
 from p2pfl.stages.stage_factory import StageFactory
 
@@ -47,6 +48,14 @@ class RoundFinishedStage(Stage):
         """Execute the stage."""
         if state is None or communication_protocol is None or aggregator is None or learner is None:
             raise Exception("Invalid parameters on RoundFinishedStage.")
+
+        # A verified installation is not round completion until every network
+        # participant has reached the same boundary.
+        from brbfl.validation import get_validator_gate
+        from brbfl.validation.byzantine_gate import wait_at_round_barrier
+
+        if get_validator_gate(state.addr) is not None:
+            wait_at_round_barrier(int(state.round), state.addr, Settings.training.AGGREGATION_TIMEOUT)
 
         # Set Next Round
         aggregator.clear()

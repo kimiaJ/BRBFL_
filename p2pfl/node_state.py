@@ -72,6 +72,7 @@ class NodeState:
         self.verified_model_hashes: dict[int, str] = {}
         self.aggregate_installation_errors: dict[int, str] = {}
         self.aggregate_lifecycle: list[dict[str, object]] = []
+        self.expected_aggregation_models: dict[int, tuple[str, ...]] = {}
         self.aggregate_installation_condition = threading.Condition()
 
         # Actual experiment

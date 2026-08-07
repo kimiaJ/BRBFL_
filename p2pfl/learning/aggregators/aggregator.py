@@ -118,6 +118,32 @@ class Aggregator(NodeComponent):
             self.__unhandled_models = []
             self._finish_aggregation_event.set()
 
+    def set_admitted_contributors(self, contributors: list[str]) -> None:
+        """
+        Replace pre-admission candidates with the canonical admitted set.
+
+        Models may arrive before the final set is known; admitted ones are
+        retained, while rejected ones are removed atomically.
+        """
+        canonical = sorted(set(contributors))
+        with self.__agg_lock:
+            unknown = set(canonical) - set(self.__train_set)
+            if unknown:
+                raise ValueError(f"admitted contributors are not in the train set: {sorted(unknown)}")
+            self.__train_set = canonical
+            self.__models = [m for m in self.__models if set(m.get_contributors()) <= set(canonical)]
+            self.__rejected_contributors.clear()
+            received = set(self.get_aggregated_models())
+            if received >= set(canonical):
+                self._finish_aggregation_event.set()
+            else:
+                self._finish_aggregation_event.clear()
+
+    def get_expected_aggregation_models(self) -> set[str]:
+        """Return the canonical contributors currently required for readiness."""
+        with self.__agg_lock:
+            return set(self.__train_set)
+
     def get_aggregated_models(self) -> list[str]:
         """
         Get the list of aggregated models.
@@ -254,7 +280,7 @@ class Aggregator(NodeComponent):
         agg_models = []
         for m in self.__models:
             agg_models += m.get_contributors()
-        missing_models = set(self.__train_set) - set(agg_models)
+        missing_models = set(self.__train_set) - set(agg_models) - self.__rejected_contributors
         return missing_models
 
     def __get_partial_aggregation(self, except_nodes: list[str]) -> P2PFLModel:

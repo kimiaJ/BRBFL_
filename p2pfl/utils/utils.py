@@ -17,6 +17,7 @@
 #
 """Utils."""
 
+import contextlib
 import time
 
 import numpy as np
@@ -217,6 +218,14 @@ def wait_to_finish(nodes: list[Node], timeout=3600, debug=False) -> None:
     # Wait until all nodes finish the workflow
     start = time.time()
     while True:
+        failures = [(node, getattr(node, "learning_exception", None)) for node in nodes]
+        failures = [(node, error) for node, error in failures if error is not None]
+        if failures:
+            primary_node, primary_error = failures[0]
+            for node in nodes:
+                with contextlib.suppress(Exception):
+                    node.stop()
+            raise RuntimeError(f"node {primary_node.addr} failed") from primary_error
         if debug:
             logger.info(
                 "Waiting for nodes to finish",

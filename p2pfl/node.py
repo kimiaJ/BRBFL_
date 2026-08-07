@@ -347,6 +347,7 @@ class Node:
             name="learning_thread-" + self.addr,
         )
         learning_thread.daemon = True
+        self.learning_exception = None
         learning_thread.start()
 
     def set_start_learning(self, rounds: int = 1, epochs: int = 1, trainset_size: int = 4, experiment_name="experiment") -> str:
@@ -433,6 +434,7 @@ class Node:
             )
 
         except Exception as e:
+            self.learning_exception = e
             logger.error(self.addr, f"Error {type(e).__name__}: {e}\n{traceback.format_exc()}")
             self.stop()
 
