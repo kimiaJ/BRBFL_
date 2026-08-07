@@ -276,10 +276,40 @@ def _comparison_fixture():
                 }
             )
             parent = result
+        from brbfl.experiments.partition_evidence import canonical_partition_manifest
+
+        partitions = canonical_partition_manifest(
+            {
+                "entries": [
+                    {
+                        "node_id": node,
+                        "split": "train",
+                        "partition_index": index,
+                        "sample_count": 10,
+                        "ordered_sample_indices_sha256": node,
+                        "ordered_targets_sha256": f"labels-{node}",
+                        "partitioning_strategy": "random_iid",
+                        "dataset_identity_sha256": "mnist",
+                        "configured_seed": 666,
+                        "effective_worker_seed": 666,
+                    }
+                    for index, node in enumerate(contributors)
+                ]
+            }
+        )
         return {
             "configuration": deepcopy(config),
             "seeds": {"experiment": 666, "partition": 666},
-            "partitions": [{"node_id": node, "partition_indices_sha256": node} for node in contributors],
+            "partitions": partitions,
+            "provenance": {
+                "evidence_schema_version": "brbfl.validation.v2",
+                "producing_commit": "fixture",
+                "controlled_configuration_sha256": "same",
+                "dataset_identity": {"name": "MNIST"},
+                "partitioning_strategy": "random_iid",
+                "configured_seeds": {"experiment": 666, "partition": 666},
+                "partition_manifest_sha256": partitions["sha256"],
+            },
             "malicious_node_ids": ["node-3", "node-4"] if attacked else [],
             "validator_admission": rows,
             "rounds": rounds,
@@ -311,7 +341,10 @@ def test_causal_comparator_accepts_real_round_one_node_zero_shape():
             lambda clean, attacked: attacked["validator_admission"][2].update(submitted_model_sha256="early-difference"),
             "pre-intervention candidate/parent mismatch",
         ),
-        (lambda clean, attacked: attacked["partitions"][0].update(partition_indices_sha256="different"), "controlled partitions differ"),
+        (
+            lambda clean, attacked: attacked["partitions"]["entries"][0].update(ordered_sample_indices_sha256="different"),
+            "controlled partitions differ",
+        ),
         (lambda clean, attacked: attacked["seeds"].update(experiment=777), "controlled seeds differ"),
         (
             lambda clean, attacked: attacked["rounds"][0]["trainer_roles"].update(actual_training_nodes=["node-0"]),
