@@ -7,7 +7,8 @@ from typing import Any
 
 import numpy as np
 import torch
-from datasets import DatasetDict
+from datasets import DatasetDict, Sequence
+from datasets import Image as ImageFeature
 from PIL import Image
 
 from brbfl.evaluation.metrics import MNISTTrigger, apply_mnist_trigger
@@ -28,6 +29,31 @@ def _partition_hashes(dataset: P2PFLDataset) -> tuple[str, str]:
         images.update(_image_bytes(row["image"]))
         labels.update(np.asarray([row["label"]], dtype=np.int64).tobytes())
     return images.hexdigest(), labels.hexdigest()
+
+
+def _sequence_dtype(feature: Any) -> np.dtype[Any] | None:
+    """Return the scalar dtype for a (possibly nested) Sequence feature."""
+    current = feature
+    while isinstance(current, Sequence):
+        current = current.feature
+    dtype = getattr(current, "dtype", None)
+    return np.dtype(dtype) if dtype is not None else None
+
+
+def _encode_image_for_feature(image: Any, feature: Any) -> Any:
+    """Encode an image consistently with the Dataset's declared image feature."""
+    if isinstance(feature, ImageFeature):
+        array = np.asarray(image)
+        return Image.fromarray(array)
+    if isinstance(feature, Sequence):
+        # Arrow Sequence columns are nested Python lists.  Returning an ndarray
+        # for only poisoned rows makes Arrow see a mixture of list/non-list
+        # values, so both changed and unchanged rows use this representation.
+        dtype = _sequence_dtype(feature)
+        return np.asarray(image, dtype=dtype).tolist()
+    if isinstance(image, torch.Tensor):
+        return image.detach().cpu().numpy()
+    return np.asarray(image)
 
 
 class BackdoorAttack:
@@ -84,18 +110,17 @@ class BackdoorAttack:
         count = int(examined * self.poison_rate)
         indices = sorted(np.random.default_rng(self.seed).permutation(examined)[:count].tolist())
         poisoned_set = set(indices)
+        image_feature = train.features["image"]
 
         def poison(row: dict[str, Any], index: int) -> dict[str, Any]:
             if index not in poisoned_set:
-                return row
+                unchanged = dict(row)
+                unchanged["image"] = _encode_image_for_feature(row["image"], image_feature)
+                return unchanged
             changed = dict(row)
-            if isinstance(row["image"], Image.Image):
-                pixels = np.asarray(row["image"], dtype=np.uint8).copy()
-                pixels[..., -self.trigger_size :, -self.trigger_size :] = np.uint8(self.trigger_value)
-                changed["image"] = Image.fromarray(pixels)
-            else:
-                triggered = apply_mnist_trigger(torch.as_tensor(np.array(row["image"], copy=True)), self.trigger)
-                changed["image"] = triggered.cpu().numpy()
+            pixels = np.array(row["image"], copy=True)
+            triggered = apply_mnist_trigger(torch.as_tensor(pixels), self.trigger)
+            changed["image"] = _encode_image_for_feature(triggered, image_feature)
             changed["label"] = self.target_class
             return changed
 

@@ -19,7 +19,9 @@ tolerance of `1e-12`.
 ## Command
 
 ```bash
-.venv/bin/python -m brbfl.experiments.smoke_reproducibility
+.venv/bin/python -m brbfl.experiments.smoke_reproducibility \
+  --config configs/smoke/mnist_numpy_clean.yaml \
+  --output-dir results/reproducibility
 ```
 
 ## Observed result

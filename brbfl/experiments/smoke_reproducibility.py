@@ -143,18 +143,20 @@ def run_twice(config_path: Path, output_dir: Path) -> dict[str, Any]:
     for run_number in (1, 2):
         environment = os.environ.copy()
         environment["PYTHONHASHSEED"] = str(config.seed)
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "brbfl.experiments.smoke_reproducibility",
-                "--single-run",
-                str(config_path),
-                str(output_dir / f"run-{run_number}"),
-            ],
-            check=True,
-            env=environment,
-        )
+        command = [
+            sys.executable,
+            "-m",
+            "brbfl.experiments.smoke_reproducibility",
+            "--single-run",
+            str(config_path),
+            str(output_dir / f"run-{run_number}"),
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True, env=environment)
+        if completed.returncode:
+            raise RuntimeError(
+                f"reproducibility child run {run_number} failed with exit code {completed.returncode}\n"
+                f"command: {command!r}\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+            )
     comparison = compare_runs(output_dir / "run-1", output_dir / "run-2")
     comparison["config_path"] = str(config_path)
     (output_dir / "comparison.json").write_text(json.dumps(comparison, indent=2, sort_keys=True) + "\n", encoding="utf-8")
