@@ -173,7 +173,7 @@ def test_backdoor_audit_rejects_wrong_attack_dispatch():
     backdoor = BackdoorAttack(poison_rate=0.3, seed=12)
     poisoned = backdoor.poison_data(source)
     label_attack = create_attack("label_flipping", {"flip_map": {1: 7}})
-    with pytest.raises(AssertionError, match="label flipping changed images"):
+    with pytest.raises(AssertionError, match="changed indices do not match the configured label map"):
         audit_partition(
             node_id=1,
             attack_type="label_flipping",
