@@ -8,9 +8,16 @@ import pytest
 
 from brbfl.experiments.config import load_experiment_config
 from brbfl.validation import AdmissionPolicy, ValidatorSubgroupGate, canonical_parameters, parameter_hash
+from p2pfl.management.logger import logger
 from p2pfl.node_state import NodeState
 from p2pfl.stages.base_node.train_stage import TrainStage
 from p2pfl.stages.base_node.vote_train_set_stage import VoteTrainSetStage
+
+
+@pytest.fixture(autouse=True)
+def _isolate_global_logger(monkeypatch):
+    """Keep these unit tests independent of registered global logger nodes."""
+    monkeypatch.setattr(logger, "experiment_started", Mock())
 
 
 def _gate(byzantine=()):
@@ -465,6 +472,10 @@ def test_later_candidate_difference_requires_prior_global_divergence():
 
     clean, attacked = _comparison_fixture()
     attacked["rounds"][0]["aggregation_lineage"]["installed_global_model_sha256"] = "clean-global-0"
+    attacked["rounds"][0]["round_installation"]["installed_model_hashes"] = {
+        node_id: "clean-global-0"
+        for node_id in attacked["rounds"][0]["round_installation"]["installation_nodes"]
+    }
     for row in attacked["validator_admission"]:
         if row["round"] == 1:
             row["parent_global_model_sha256"] = "clean-global-0"
