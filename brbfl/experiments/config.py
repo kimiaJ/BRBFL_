@@ -55,6 +55,22 @@ class ValidationConfig:
 
 
 @dataclass(frozen=True)
+class BlockchainConfig:
+    """Optional lifecycle-ledger backend settings."""
+
+    enabled: bool = False
+    backend: str = "memory"
+    fail_closed: bool = True
+
+
+@dataclass(frozen=True)
+class ParticipantSelectionConfig:
+    """Round-role selection strategy (static until a future CA milestone)."""
+
+    mode: str = "static"
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     """Complete runnable experiment settings."""
 
@@ -75,6 +91,8 @@ class ExperimentConfig:
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
     attack: AttackConfig = field(default_factory=AttackConfig)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
+    blockchain: BlockchainConfig = field(default_factory=BlockchainConfig)
+    participant_selection: ParticipantSelectionConfig = field(default_factory=ParticipantSelectionConfig)
 
 
 def _topology(value: str | TopologyType) -> TopologyType:
@@ -89,6 +107,8 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     dataset_raw = raw.get("dataset", {}) or {}
     attack_raw = raw.get("attack", {}) or {}
     validation_raw = raw.get("validation", {}) or {}
+    blockchain_raw = raw.get("blockchain", {}) or {}
+    selection_raw = raw.get("participant_selection", {}) or {}
 
     dataset = DatasetConfig(
         name=dataset_raw.get("name", DatasetConfig.name),
@@ -110,6 +130,16 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         max_l2_norm=float(validation_raw.get("max_l2_norm", float("inf"))),
         reference_reject_candidates=tuple(validation_raw.get("reference_reject_candidates", ()) or ()),
     )
+    blockchain = BlockchainConfig(
+        enabled=bool(blockchain_raw.get("enabled", False)),
+        backend=str(blockchain_raw.get("backend", "memory")),
+        fail_closed=bool(blockchain_raw.get("fail_closed", True)),
+    )
+    if blockchain.enabled and blockchain.backend != "memory":
+        raise ValueError(f"unsupported blockchain ledger backend: {blockchain.backend}")
+    participant_selection = ParticipantSelectionConfig(mode=str(selection_raw.get("mode", "static")))
+    if participant_selection.mode != "static":
+        raise ValueError(f"unsupported participant selection mode: {participant_selection.mode}")
 
     return ExperimentConfig(
         nodes=raw.get("nodes", ExperimentConfig.nodes),
@@ -129,4 +159,6 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         dataset=dataset,
         attack=attack,
         validation=validation,
+        blockchain=blockchain,
+        participant_selection=participant_selection,
     )
