@@ -7,7 +7,7 @@ import copy
 import numpy as np
 import pytest
 import torch
-from datasets import Dataset, DatasetDict, Features, Image, Value, load_from_disk
+from datasets import Dataset, DatasetDict, Features, Image, Sequence, Value, load_from_disk
 from PIL import Image as PILImage
 
 from brbfl.attacks import create_attack
@@ -86,12 +86,19 @@ def test_fraction_relabeling_source_copy_and_deterministic_evidence():
     second.poison_data(partition())
     evidence = first.poisoning_evidence
     assert evidence == second.poisoning_evidence
+    assert evidence["changed_image_indices"] == [1, 5, 7]
     assert evidence["samples_examined"] == 10
     assert evidence["samples_poisoned"] == 3
     assert source._data["train"].to_dict() == snapshot
+    assert isinstance(poisoned._data["train"].features["image"], Sequence)
     for index in range(10):
         before = np.asarray(source._data["train"][index]["image"])
-        after = np.asarray(poisoned._data["train"][index]["image"])
+        encoded = poisoned._data["train"][index]["image"]
+        assert isinstance(encoded, list)
+        assert all(isinstance(row, list) for row in encoded)
+        after = np.asarray(encoded, dtype=np.float32)
+        assert after.shape == (28, 28)
+        assert after.dtype == np.float32
         if index in evidence["changed_image_indices"]:
             assert poisoned._data["train"][index]["label"] == 9
             assert np.all(after[25:28, 25:28] == 1.0)

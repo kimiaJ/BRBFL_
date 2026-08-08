@@ -4,8 +4,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from brbfl.experiments.config import DatasetConfig, ExperimentConfig
-from brbfl.experiments.smoke_reproducibility import compare_runs, run_once
+import pytest
+
+from brbfl.experiments.config import DatasetConfig, ExperimentConfig, load_experiment_config
+from brbfl.experiments.smoke_reproducibility import compare_runs, run_once, run_twice
+
+COMPATIBLE_CONFIG = Path("configs/smoke/mnist_numpy_clean.yaml")
 
 
 def test_two_smoke_runs_are_identical(tmp_path: Path):
@@ -20,6 +24,21 @@ def test_two_smoke_runs_are_identical(tmp_path: Path):
     assert all(result["classification"] == "identical" for result in comparison["comparisons"].values())
 
 
+def test_config_boundary_accepts_synthetic_numpy_and_rejects_real_pytorch(tmp_path: Path):
+    """The dedicated config is valid while the real training config fails clearly."""
+    run_once(load_experiment_config(COMPATIBLE_CONFIG), tmp_path / "compatible")
+    incompatible = load_experiment_config(Path("configs/smoke/mnist_clean.yaml"))
+    with pytest.raises(ValueError, match="requires framework=numpy and dataset=synthetic-mnist"):
+        run_once(incompatible, tmp_path / "incompatible")
+
+
+def test_two_isolated_processes_produce_comparison(tmp_path: Path):
+    """Fresh child processes produce the complete exact comparison."""
+    comparison = run_twice(COMPATIBLE_CONFIG, tmp_path / "isolated")
+    assert comparison["all_requested_outputs_identical"]
+    assert len(comparison["comparisons"]) == 6
+
+
 def test_module_execution_invokes_experiment(tmp_path: Path):
     """The module entry point executes both runs and reports their result."""
     output_dir = tmp_path / "reproducibility"
@@ -30,7 +49,7 @@ def test_module_execution_invokes_experiment(tmp_path: Path):
             "-m",
             "brbfl.experiments.smoke_reproducibility",
             "--config",
-            "configs/smoke/mnist_clean.yaml",
+            str(COMPATIBLE_CONFIG),
             "--output-dir",
             str(output_dir),
         ],
