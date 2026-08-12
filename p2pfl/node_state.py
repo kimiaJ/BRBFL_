@@ -112,6 +112,11 @@ class NodeState:
             previous = self.installed_model_hashes.get(round_number)
             if previous is not None and previous != digest:
                 raise RuntimeError(f"conflicting verified aggregate installation: round={round_number}, previous={previous}, new={digest}")
+            from brbfl.ledger.runtime import get_runtime_ledger
+
+            runtime_ledger = get_runtime_ledger()
+            if runtime_ledger is not None:
+                runtime_ledger.confirm_installation(round_number, self.addr, digest)
             self.installed_model_hashes[round_number] = digest
             self.verified_model_hashes[round_number] = digest
             self.record_aggregate_lifecycle(
