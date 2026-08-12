@@ -435,6 +435,9 @@ def mnist(
                 enabled=config.blockchain.enabled,
                 backend=config.blockchain.backend,
                 fail_closed=config.blockchain.fail_closed,
+                trust_enabled=config.trust.enabled,
+                trust_prior_alpha=config.trust.prior_alpha,
+                trust_prior_beta=config.trust.prior_beta,
             ),
             experiment_id=f"mnist:{config.seed}:{attack_name}",
             participants=tuple(node.addr for node in nodes),
@@ -776,6 +779,7 @@ def mnist(
                 ),
                 "rounds": round_evidence,
                 "ledger": runtime_ledger.validation_artifact(),
+                **({"trust": runtime_ledger.trust_artifact()} if runtime_ledger.trust_artifact() is not None else {}),
                 "final_model_sha256": (
                     training_audits["node-0"].evidence_for_round(r - 1)["installed_global_model_sha256"]
                     if collusion_validation
