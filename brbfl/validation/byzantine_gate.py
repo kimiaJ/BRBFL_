@@ -147,8 +147,18 @@ class ValidatorSubgroupGate:
             finite = all(bool(np.isfinite(item).all()) for item in snapshot)
             norm = math.sqrt(sum(float(np.sum(np.asarray(item, dtype=np.float64) ** 2)) for item in snapshot))
             reference = finite and norm <= self.policy.max_l2_norm and candidate not in self.policy.reference_reject_candidates
+            # The configured policy is only the bootstrap/attack identity
+            # configuration.  Once a runtime round exists, its frozen role
+            # assignment is the sole authority for who may publish a vote.
+            from brbfl.ledger.runtime import get_runtime_ledger
+
+            runtime_ledger = get_runtime_ledger()
+            validators = self.policy.validators
+            if runtime_ledger is not None and runtime_ledger.ledger is not None:
+                runtime_ledger.open_round(round_number, parent_global_model_sha256)
+                validators = runtime_ledger.selected_validators(round_number)
             votes = []
-            for validator in self.policy.validators:
+            for validator in validators:
                 byzantine = validator in self.policy.byzantine_validators
                 reported = not reference if byzantine else reference
                 vote = {
@@ -193,8 +203,8 @@ class ValidatorSubgroupGate:
                 "candidate_node_id": candidate,
                 "submitted_model_sha256": submitted_hash,
                 "parent_global_model_sha256": parent_global_model_sha256,
-                "eligible_validators": list(self.policy.validators),
-                "received_validators": list(self.policy.validators),
+                "eligible_validators": list(validators),
+                "received_validators": list(validators),
                 "missing_validators": [],
                 "duplicate_votes": [],
                 "invalid_votes": [],
@@ -214,9 +224,6 @@ class ValidatorSubgroupGate:
                 "lifecycle_state": "admission_calculated",
                 "_snapshot": snapshot,
             }
-            from brbfl.ledger.runtime import get_runtime_ledger
-
-            runtime_ledger = get_runtime_ledger()
             if runtime_ledger is not None:
                 runtime_ledger.record_candidate(
                     round_number,

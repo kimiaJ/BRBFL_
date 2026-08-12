@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from brbfl.ledger import BlockchainLedger, create_ledger, disabled_ledger_artifact
-from brbfl.selection.roles import SelectionContext, StaticRoundRoleSelector, TrustRankedValidatorSelector
+from brbfl.selection.roles import RoundRoleAssignment, SelectionContext, StaticRoundRoleSelector, TrustRankedValidatorSelector
 from brbfl.trust import TrustRuntime
 
 
@@ -56,6 +56,7 @@ class RuntimeLedgerAdapter:
         self._candidate_hashes: dict[int, dict[str, str]] = {}
         self._admissions: dict[int, dict[str, bool]] = {}
         self._aggregates: dict[int, str] = {}
+        self._assignments: dict[int, RoundRoleAssignment] = {}
         trust_population = config.validator_eligible_participants or self.validators
         self.validator_eligible_participants = tuple(sorted(trust_population))
         if config.selection_strategy == "trust_ranked" and (not config.trust_enabled or config.trust_observation_only):
@@ -133,7 +134,20 @@ class RuntimeLedgerAdapter:
             )
             self._invoke(self._ledger.commit_round_roles, assignment)
             self._invoke(self._ledger.open_round, self.experiment_id, int(round_number), parent_model_hash)
+            self._assignments[int(round_number)] = assignment
             self._parents[int(round_number)] = parent_model_hash
+
+    def role_assignment(self, round_number: int) -> RoundRoleAssignment:
+        """Return the immutable authoritative assignment for an opened round."""
+        with self._lock:
+            try:
+                return self._assignments[int(round_number)]
+            except KeyError as exc:
+                raise RuntimeError(f"round role assignment is unavailable before open_round: {round_number}") from exc
+
+    def selected_validators(self, round_number: int) -> tuple[str, ...]:
+        """Return validators from the frozen assignment for an opened round."""
+        return self.role_assignment(round_number).selected_validators
 
     def record_candidate(
         self,
