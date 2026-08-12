@@ -66,9 +66,15 @@ class BlockchainConfig:
 
 @dataclass(frozen=True)
 class ParticipantSelectionConfig:
-    """Round-role selection strategy (static until a future CA milestone)."""
+    """Round-role selection strategy."""
 
     mode: str = "static"
+    bootstrap_rounds: int = 1
+    target_count: int = 0
+    eligible_participants: tuple[str, ...] = ()
+    minimum_trust: float = 0.5
+    insufficient_eligible_policy: str = "fail_closed"
+    tie_breaker: str = "node_id"
 
 
 @dataclass(frozen=True)
@@ -92,8 +98,6 @@ class TrustConfig:
             raise ValueError("trust prior_alpha must be finite and greater than zero")
         if not math.isfinite(self.prior_beta) or self.prior_beta <= 0:
             raise ValueError("trust prior_beta must be finite and greater than zero")
-        if not self.observation_only:
-            raise ValueError("trust must remain observation_only in this milestone")
 
 
 @dataclass(frozen=True)
@@ -135,7 +139,7 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     attack_raw = raw.get("attack", {}) or {}
     validation_raw = raw.get("validation", {}) or {}
     blockchain_raw = raw.get("blockchain", {}) or {}
-    selection_raw = raw.get("participant_selection", {}) or {}
+    selection_raw = raw.get("selection", raw.get("participant_selection", {})) or {}
     trust_raw = raw.get("trust", {}) or {}
 
     dataset = DatasetConfig(
@@ -165,8 +169,17 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     )
     if blockchain.enabled and blockchain.backend != "memory":
         raise ValueError(f"unsupported blockchain ledger backend: {blockchain.backend}")
-    participant_selection = ParticipantSelectionConfig(mode=str(selection_raw.get("mode", "static")))
-    if participant_selection.mode != "static":
+    validator_selection = ((selection_raw.get("dynamic_roles", {}) or {}).get("validators", {}) or {})
+    mode = str(selection_raw.get("strategy", selection_raw.get("mode", "static")))
+    participant_selection = ParticipantSelectionConfig(
+        mode=mode, bootstrap_rounds=int(validator_selection.get("bootstrap_rounds", selection_raw.get("bootstrap_rounds", 1))),
+        target_count=int(validator_selection.get("target_count", selection_raw.get("target_count", 0))),
+        eligible_participants=tuple(validator_selection.get("eligible_participants", selection_raw.get("eligible_participants", ())) or ()),
+        minimum_trust=float(validator_selection.get("minimum_trust", selection_raw.get("minimum_trust", .5))),
+        insufficient_eligible_policy=str(validator_selection.get("insufficient_eligible_policy", "fail_closed")),
+        tie_breaker=str(validator_selection.get("tie_breaker", "node_id")),
+    )
+    if participant_selection.mode not in {"static", "trust_ranked"}:
         raise ValueError(f"unsupported participant selection mode: {participant_selection.mode}")
     trust = TrustConfig(
         enabled=bool(trust_raw.get("enabled", False)),
@@ -176,6 +189,11 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         update_source=str(trust_raw.get("update_source", "validator_reference_agreement")),
         observation_only=bool(trust_raw.get("observation_only", True)),
     )
+    if participant_selection.mode == "trust_ranked":
+        if not trust.enabled or trust.observation_only:
+            raise ValueError("trust_ranked selection requires enabled trust with observation_only=false")
+        if participant_selection.insufficient_eligible_policy != "fail_closed" or participant_selection.tie_breaker != "node_id":
+            raise ValueError("unsupported trust-ranked selection policy")
 
     return ExperimentConfig(
         nodes=raw.get("nodes", ExperimentConfig.nodes),
