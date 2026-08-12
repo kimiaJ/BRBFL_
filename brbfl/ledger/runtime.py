@@ -115,9 +115,18 @@ class RuntimeLedgerAdapter:
         parent_model_hash: str,
         candidate_hash: str,
         votes: list[dict[str, Any]],
+        *,
+        publisher_id: str | None = None,
     ) -> None:
-        """Record the candidate hash and exact validator decisions already produced by the gate."""
+        """Record decisions only from the candidate owner's authoritative callback."""
         with self._lock:
+            # Every process-local node gate observes transported candidates, but
+            # the TrainStage callback of the candidate owner is the workflow's
+            # sole producer.  Receiver gates verify locally and must not turn
+            # their independently ordered audit rows into ledger commitments.
+            publisher_id = contributor_id if publisher_id is None else publisher_id
+            if publisher_id != contributor_id:
+                return
             self.open_round(round_number, parent_model_hash)
             if self._ledger is None:
                 return

@@ -3,6 +3,7 @@
 # ruff: noqa: D103
 
 import json
+import threading
 
 import pytest
 
@@ -29,7 +30,12 @@ def votes(candidate: str, decision: bool = True) -> list[dict[str, object]]:
             "validator_node_id": validator,
             "candidate_node_id": candidate,
             "reported_decision": decision,
-            "evidence": f"workflow-evidence-{validator}-{candidate}",
+            "vote_sha256": f"vote-{validator}-{candidate}",
+            "reference_decision": decision,
+            "byzantine": False,
+            "strategy": "honest_reference",
+            "attack_group_id": None,
+            "order_index": 1,
         }
         for validator in VALIDATORS
     ]
@@ -145,3 +151,75 @@ def test_participant_and_role_commitments_are_deterministic():
     assert left.validation_artifact()["per_round_role_assignment_hash"] == right.validation_artifact()[
         "per_round_role_assignment_hash"
     ]
+
+
+def test_five_node_callback_topology_has_one_authoritative_publisher_per_candidate():
+    runtime = adapter()
+    barrier = threading.Barrier(len(PARTICIPANTS))
+    errors: list[BaseException] = []
+
+    def callback(node_id: str) -> None:
+        try:
+            barrier.wait()
+            for offset, contributor in enumerate(reversed(CONTRIBUTORS)):
+                observed_votes = votes(contributor)
+                for vote in observed_votes:
+                    # Reproduce node-local gate ordering differences.  These
+                    # rows are valid observations, not authoritative publishes.
+                    vote["order_index"] = offset + int(node_id[-1]) + 1
+                    vote["vote_sha256"] = f"{node_id}-{offset}-{vote['validator_node_id']}"
+                runtime.record_candidate(
+                    0,
+                    contributor,
+                    "parent",
+                    f"candidate-{contributor}",
+                    observed_votes,
+                    publisher_id=node_id,
+                )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=callback, args=(node,)) for node in PARTICIPANTS]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    decisions = [event for event in runtime.ledger.events if event.event_type.value == "ValidatorDecisionCommitted"]
+    assert len(decisions) == len(CONTRIBUTORS) * len(VALIDATORS)
+    assert {event.payload["contributor_id"] for event in decisions} == set(CONTRIBUTORS)
+    runtime.finalize_admission(0, dict.fromkeys(CONTRIBUTORS, True))
+
+
+def test_authoritative_repeats_are_idempotent_but_meaningful_conflicts_fail_closed():
+    runtime = adapter()
+    original = votes("node-0")
+    runtime.record_candidate(0, "node-0", "parent", "candidate", original, publisher_id="node-0")
+    event_count = len(runtime.ledger.events)
+    runtime.record_candidate(0, "node-0", "parent", "candidate", original, publisher_id="node-0")
+    assert len(runtime.ledger.events) == event_count
+
+    changed = votes("node-0")
+    changed[0]["order_index"] = 99
+    changed[0]["vote_sha256"] = "changed"
+    with pytest.raises(RuntimeError, match=r"first_differing_field=order_index"):
+        runtime.record_candidate(0, "node-0", "parent", "candidate", changed, publisher_id="node-0")
+
+    with pytest.raises(RuntimeError, match="conflicting candidate commitment"):
+        runtime.record_candidate(0, "node-0", "parent", "different-candidate", original, publisher_id="node-0")
+    with pytest.raises(RuntimeError, match="conflicting runtime round parent"):
+        runtime.record_candidate(0, "node-0", "different-parent", "candidate", original, publisher_id="node-0")
+
+
+def test_decision_conflict_prevents_admission_aggregation_and_installation():
+    runtime = adapter()
+    runtime.record_candidate(0, "node-0", "parent", "candidate", votes("node-0"))
+    with pytest.raises(RuntimeError, match="conflicting validator decision"):
+        runtime.ledger.record_validator_decision(
+            "five-node-clean", 0, "node-0", "node-0", "candidate", False, {"strategy": "contradiction"}
+        )
+    with pytest.raises(RuntimeError, match="every and only committed"):
+        runtime.finalize_admission(0, dict.fromkeys(CONTRIBUTORS, True))
+    with pytest.raises(RuntimeError, match="before admission"):
+        runtime.confirm_installation(0, "node-0", "aggregate")
