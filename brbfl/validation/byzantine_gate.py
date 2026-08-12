@@ -224,6 +224,7 @@ class ValidatorSubgroupGate:
                     parent_global_model_sha256,
                     submitted_hash,
                     votes,
+                    publisher_id=current_node,
                 )
             return admitted
 

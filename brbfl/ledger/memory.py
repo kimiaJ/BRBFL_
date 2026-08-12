@@ -196,10 +196,56 @@ class InMemoryLedger(BlockchainLedger):
         existing = record.decisions.get(key)
         if existing is not None:
             if existing != payload:
-                raise RuntimeError(f"conflicting validator decision: {key}")
+                existing_diagnostic = self._decision_diagnostic(round_number, record, existing)
+                incoming_diagnostic = self._decision_diagnostic(round_number, record, payload)
+                fields = (
+                    "round",
+                    "validator_id",
+                    "contributor_id",
+                    "admitted",
+                    "candidate_hash",
+                    "parent_model_hash",
+                    "reference_decision",
+                    "byzantine",
+                    "strategy",
+                    "attack_group_id",
+                    "order_index",
+                    "vote_sha256",
+                    "evidence_hash",
+                )
+                first = next(
+                    field
+                    for field in fields
+                    if existing_diagnostic.get(field) != incoming_diagnostic.get(field)
+                )
+                raise RuntimeError(
+                    "conflicting validator decision: "
+                    f"key={key}, first_differing_field={first}, "
+                    f"existing={existing_diagnostic}, incoming={incoming_diagnostic}"
+                )
             return self._idempotent(EventType.VALIDATOR_DECISION_COMMITTED, experiment_id, payload, round_number, validator_id)
         record.decisions[key] = payload
         return self._append(EventType.VALIDATOR_DECISION_COMMITTED, experiment_id, payload, round_number, validator_id)
+
+    @staticmethod
+    def _decision_diagnostic(round_number: int, record: _Round, payload: dict[str, Any]) -> dict[str, Any]:
+        """Return stable, parameter-free fields for a decision conflict."""
+        evidence = payload.get("evidence")
+        return {
+            "round": round_number,
+            "validator_id": payload["validator_id"],
+            "contributor_id": payload["contributor_id"],
+            "candidate_hash": payload["candidate_hash"],
+            "parent_model_hash": record.parent_model_hash,
+            "admitted": payload["admitted"],
+            "evidence_hash": canonical_hash("ValidatorDecisionEvidence/v1", evidence),
+            "vote_sha256": evidence.get("vote_sha256") if isinstance(evidence, dict) else None,
+            "reference_decision": evidence.get("reference_decision") if isinstance(evidence, dict) else None,
+            "byzantine": evidence.get("byzantine") if isinstance(evidence, dict) else None,
+            "strategy": evidence.get("strategy") if isinstance(evidence, dict) else None,
+            "attack_group_id": evidence.get("attack_group_id") if isinstance(evidence, dict) else None,
+            "order_index": evidence.get("order_index") if isinstance(evidence, dict) else None,
+        }
 
     def finalize_admission(self, experiment_id: str, round_number: int, decisions: dict[str, bool]) -> LedgerReceipt:
         record = self._round(experiment_id, round_number)
