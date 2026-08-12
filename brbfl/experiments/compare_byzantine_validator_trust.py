@@ -15,7 +15,8 @@ def _digest(domain: str, value: object) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def _trust(run: dict[str, Any], name: str) -> dict[str, Any]:
+def validate_trust_integrity(run: dict[str, Any], name: str) -> dict[str, Any]:
+    """Validate ledger and Beta-trust integrity without making causal claims."""
     trust = run.get("trust")
     if not isinstance(trust, dict):
         raise AssertionError(f"{name} trust section is missing")
@@ -68,10 +69,29 @@ def _trust(run: dict[str, Any], name: str) -> dict[str, Any]:
     return trust
 
 
-def _controlled(run: dict[str, Any]) -> dict[str, Any]:
-    config = run.get("configuration", {})
+_CONTROLLED_ASSIGNMENT_FIELDS = (
+    "round_number",
+    "network_participants",
+    "selected_contributors",
+    "selected_validators",
+    "aggregation_eligible_nodes",
+    "detector_subgroups",
+    "selection_source",
+    "previous_state_hash",
+)
+
+
+def _initial_assignment(run: dict[str, Any]) -> dict[str, Any]:
     ledger = run.get("ledger", run)
+    assignment = ledger.get("per_round_role_assignment", {}).get("0") or {}
+    return {field: assignment.get(field) for field in _CONTROLLED_ASSIGNMENT_FIELDS}
+
+
+def controlled_fields(run: dict[str, Any]) -> dict[str, Any]:
+    """Return normalized fields that must be identical between interventions."""
+    config = run.get("configuration", {})
     rounds = run.get("rounds", [])
+    provenance = run.get("provenance", {})
     return {
         "seed": config.get("seed", run.get("seed")),
         "nodes": config.get("nodes"),
@@ -81,15 +101,23 @@ def _controlled(run: dict[str, Any]) -> dict[str, Any]:
         "partitions": run.get("partitions"),
         "initial_model_hash": run.get("initial_model_sha256"),
         "candidate_assignments": [r.get("trainer_roles", {}).get("submitted_candidates") for r in rounds],
-        "initial_validator_assignment": ledger.get("per_round_role_assignment", {}).get("0"),
+        "initial_validator_assignment": _initial_assignment(run),
+        "producing_commit": provenance.get("producing_commit"),
+        "controlled_configuration_sha256": provenance.get("controlled_configuration_sha256"),
     }
+
+
+# Kept as private aliases for callers written against the original comparator.
+_trust = validate_trust_integrity
+_controlled = controlled_fields
 
 
 def compare_evidence(clean: dict[str, Any], attacked: dict[str, Any]) -> dict[str, Any]:
     """Validate both artifacts and return a canonical causal comparison."""
-    clean_trust, attacked_trust = _trust(clean, "clean"), _trust(attacked, "attacked")
-    controlled = _controlled(clean)
-    if controlled != _controlled(attacked):
+    clean_trust = validate_trust_integrity(clean, "clean")
+    attacked_trust = validate_trust_integrity(attacked, "attacked")
+    controlled = controlled_fields(clean)
+    if controlled != controlled_fields(attacked):
         raise AssertionError("controlled experiment fields are incompatible")
     for field in ("method", "prior"):
         if clean_trust.get(field) != attacked_trust.get(field):
