@@ -7,7 +7,12 @@ import json
 from pathlib import Path
 from typing import Any
 
-from brbfl.experiments.compare_byzantine_validator_trust import _digest, controlled_fields, validate_trust_integrity
+from brbfl.experiments.compare_byzantine_validator_trust import (
+    _digest,
+    canonicalize_json,
+    controlled_fields,
+    validate_trust_integrity,
+)
 
 _BOOTSTRAP_VALIDATORS = ["node-0", "node-3", "node-4"]
 _ROTATED_VALIDATORS = ["node-0", "node-1", "node-2"]
@@ -91,6 +96,7 @@ def compare_dynamic(clean: dict[str, Any], attacked: dict[str, Any]) -> dict[str
         "verification_result": True,
         "verification_reason": "verified",
     }
+    result = canonicalize_json(result)
     result["comparison_sha256"] = _digest("DynamicTrustComparison/v1", result)
     return result
 
@@ -104,7 +110,7 @@ def main() -> None:
     a = p.parse_args()
     result = compare_dynamic(json.loads(a.clean.read_text()), json.loads(a.attacked.read_text()))
     a.output.parent.mkdir(parents=True, exist_ok=True)
-    a.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    a.output.write_text(json.dumps(canonicalize_json(result), indent=2, sort_keys=True, allow_nan=False) + "\n")
 
 
 if __name__ == "__main__":
