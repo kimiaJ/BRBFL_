@@ -79,6 +79,7 @@ class BlockchainLedger(ABC):
         contributor_id: str,
         candidate_hash: str,
         admitted: bool,
+        evidence: dict[str, Any] | None = None,
     ) -> LedgerReceipt: ...
 
     @abstractmethod

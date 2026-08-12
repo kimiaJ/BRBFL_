@@ -48,6 +48,12 @@ from brbfl.experiments.partition_evidence import build_partition_manifest, build
 from brbfl.experiments.reproducibility import seed_everything
 from brbfl.experiments.round_evidence import assert_round_evidence, malicious_participants, triggered_round_metrics
 from brbfl.experiments.sign_flipping_evidence import AuditedModelUpdateAttack
+from brbfl.ledger.runtime import (
+    RuntimeLedgerAdapter,
+    RuntimeLedgerConfig,
+    clear_runtime_ledger,
+    install_runtime_ledger,
+)
 from brbfl.validation import AdmissionPolicy, ValidatorSubgroupGate, clear_validator_gate, install_validator_gate, validator_evidence
 from p2pfl.communication.protocols.protobuff.grpc import GrpcCommunicationProtocol
 from p2pfl.communication.protocols.protobuff.memory import MemoryCommunicationProtocol
@@ -328,6 +334,8 @@ def mnist(
     attack_params = config.attack.parameters
     clear_attacks()
     clear_validator_gate()
+    clear_runtime_ledger()
+    runtime_ledger = None
     validator_gate = None
     if config.validation.enabled:
         byzantine = tuple(f"node-{index}" for index in adversary_indices) if attack_name == "byzantine_validator" else ()
@@ -421,6 +429,19 @@ def mnist(
             node_attack = attack_name if i in adversary_indices else "N/A"
             logger.info(node.addr, f"Node {i} | Adversary: {i in adversary_indices} | Attack: {node_attack}")
             nodes.append(node)
+
+        runtime_ledger = RuntimeLedgerAdapter(
+            RuntimeLedgerConfig(
+                enabled=config.blockchain.enabled,
+                backend=config.blockchain.backend,
+                fail_closed=config.blockchain.fail_closed,
+            ),
+            experiment_id=f"mnist:{config.seed}:{attack_name}",
+            participants=tuple(node.addr for node in nodes),
+            contributors=config.validation.contributors,
+            validators=config.validation.validators,
+        )
+        install_runtime_ledger(runtime_ledger)
 
         adjacency_matrix = TopologyFactory.generate_matrix(topology.value, len(nodes))
         TopologyFactory.connect_nodes(adjacency_matrix, nodes)
@@ -754,6 +775,7 @@ def mnist(
                     else {}
                 ),
                 "rounds": round_evidence,
+                "ledger": runtime_ledger.validation_artifact(),
                 "final_model_sha256": (
                     training_audits["node-0"].evidence_for_round(r - 1)["installed_global_model_sha256"]
                     if collusion_validation
@@ -823,6 +845,7 @@ def mnist(
                 pd.DataFrame(rows).to_csv("results/metrics_all_nodes.csv", index=False)
 
     finally:
+        clear_runtime_ledger()
         clear_validator_gate()
         for node in nodes:
             node.stop()

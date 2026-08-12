@@ -170,7 +170,14 @@ class InMemoryLedger(BlockchainLedger):
         return self._append(EventType.CANDIDATE_COMMITTED, experiment_id, payload, round_number, contributor_id)
 
     def record_validator_decision(
-        self, experiment_id: str, round_number: int, validator_id: str, contributor_id: str, candidate_hash: str, admitted: bool
+        self,
+        experiment_id: str,
+        round_number: int,
+        validator_id: str,
+        contributor_id: str,
+        candidate_hash: str,
+        admitted: bool,
+        evidence: dict[str, Any] | None = None,
     ) -> LedgerReceipt:
         record = self._round(experiment_id, round_number)
         if validator_id not in record.assignment.selected_validators:
@@ -178,7 +185,13 @@ class InMemoryLedger(BlockchainLedger):
         candidate = record.candidates.get(contributor_id)
         if candidate is None or candidate["candidate_hash"] != candidate_hash:
             raise RuntimeError("validator decision does not reference the exact committed candidate hash")
-        payload = {"validator_id": validator_id, "contributor_id": contributor_id, "candidate_hash": candidate_hash, "admitted": admitted}
+        payload = {
+            "validator_id": validator_id,
+            "contributor_id": contributor_id,
+            "candidate_hash": candidate_hash,
+            "admitted": admitted,
+            "evidence": deepcopy(evidence) if evidence is not None else None,
+        }
         key = (validator_id, contributor_id)
         existing = record.decisions.get(key)
         if existing is not None:
@@ -324,6 +337,15 @@ class InMemoryLedger(BlockchainLedger):
     def validation_artifact(self, experiment_id: str) -> dict[str, Any]:
         experiment = self._experiment(experiment_id)
         rounds = sorted(experiment.rounds)
+        round_verification: dict[str, bool] = {}
+        verification_reason: dict[str, str] = {}
+        for number in rounds:
+            try:
+                round_verification[str(number)] = self.verify_round(experiment_id, number)
+                verification_reason[str(number)] = "verified"
+            except RuntimeError as exc:
+                round_verification[str(number)] = False
+                verification_reason[str(number)] = str(exc)
         return {
             "enabled": True,
             "backend": "memory",
@@ -335,9 +357,41 @@ class InMemoryLedger(BlockchainLedger):
             "per_round_events": {
                 str(number): [event.event_type.value for event in self._events if event.round_number == number] for number in rounds
             },
+            "rounds": {
+                str(number): {
+                    "parent_model_hash": experiment.rounds[number].parent_model_hash,
+                    "candidate_commitments": {
+                        node: dict(value) for node, value in sorted(experiment.rounds[number].candidates.items())
+                    },
+                    "validator_decisions": [
+                        dict(value) for _key, value in sorted(experiment.rounds[number].decisions.items())
+                    ],
+                    "admission": (
+                        {node: experiment.rounds[number].admission[node] for node in sorted(experiment.rounds[number].admission)}
+                        if experiment.rounds[number].admission is not None
+                        else None
+                    ),
+                    "aggregate": experiment.rounds[number].aggregate,
+                    "installation_confirmations": dict(sorted(experiment.rounds[number].installations.items())),
+                    "finalized": experiment.rounds[number].finalized,
+                }
+                for number in rounds
+            },
             "event_receipts": [event.backend_reference for event in self._events],
+            "ordered_events": [
+                {
+                    "sequence_number": event.sequence_number,
+                    "event_type": event.event_type.value,
+                    "round_number": event.round_number,
+                    "participant_id": event.participant_id,
+                    "payload_hash": event.payload_hash,
+                    "event_hash": event.event_hash,
+                }
+                for event in self._events
+            ],
             "final_event_chain_hash": self.final_event_chain_hash,
-            "round_verification": {str(number): self.verify_round(experiment_id, number) for number in rounds},
+            "round_verification": round_verification,
+            "verification_reason": verification_reason,
             "ledger_round_consensus": all(experiment.rounds[number].finalized for number in rounds),
         }
 

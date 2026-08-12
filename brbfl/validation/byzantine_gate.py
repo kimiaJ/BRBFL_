@@ -214,6 +214,17 @@ class ValidatorSubgroupGate:
                 "lifecycle_state": "admission_calculated",
                 "_snapshot": snapshot,
             }
+            from brbfl.ledger.runtime import get_runtime_ledger
+
+            runtime_ledger = get_runtime_ledger()
+            if runtime_ledger is not None:
+                runtime_ledger.record_candidate(
+                    round_number,
+                    candidate,
+                    parent_global_model_sha256,
+                    submitted_hash,
+                    votes,
+                )
             return admitted
 
     def observe_round_result(self, round_id: Any, parameters: list[Any], contributors: list[str], *, canonical_hash_source: str) -> None:
@@ -365,6 +376,12 @@ def publish_admission_decision(round_id: int, candidate: str, admitted: bool) ->
         previous = decisions.setdefault(candidate, bool(admitted))
         if previous != bool(admitted):
             raise RuntimeError(f"conflicting admission decision: round={round_id}, candidate={candidate}")
+        if _gate_policy is not None and set(decisions) == set(_gate_policy.contributors):
+            from brbfl.ledger.runtime import get_runtime_ledger
+
+            runtime_ledger = get_runtime_ledger()
+            if runtime_ledger is not None:
+                runtime_ledger.finalize_admission(int(round_id), decisions)
         _registry_condition.notify_all()
 
 
@@ -399,6 +416,11 @@ def wait_at_round_barrier(round_id: int, node_id: str, timeout: float) -> None:
             if remaining <= 0:
                 raise TimeoutError(f"round barrier timed out: round={round_id}, missing={sorted(participants - arrived)}")
             _registry_condition.wait(remaining)
+        from brbfl.ledger.runtime import get_runtime_ledger
+
+        runtime_ledger = get_runtime_ledger()
+        if runtime_ledger is not None:
+            runtime_ledger.finalize_round(int(round_id))
 
 
 def get_validator_gate(node_id: str | None = None) -> ValidatorSubgroupGate | None:

@@ -21,6 +21,10 @@ validation:
   acceptance_threshold: 2
   max_l2_norm: .inf
   reference_reject_candidates: [node-0]
+blockchain:
+  enabled: true
+  backend: memory
+  fail_closed: true
 attack:
   name: none
   adversaries: []
