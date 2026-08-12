@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from brbfl.ledger import BlockchainLedger, create_ledger, disabled_ledger_artifact
-from brbfl.selection.roles import SelectionContext, StaticRoundRoleSelector
+from brbfl.selection.roles import SelectionContext, StaticRoundRoleSelector, TrustRankedValidatorSelector
 from brbfl.trust import TrustRuntime
 
 
@@ -21,6 +21,12 @@ class RuntimeLedgerConfig:
     trust_enabled: bool = False
     trust_prior_alpha: float = 1.0
     trust_prior_beta: float = 1.0
+    trust_observation_only: bool = True
+    selection_strategy: str = "static"
+    validator_eligible_participants: tuple[str, ...] = ()
+    validator_target_count: int = 0
+    validator_minimum_trust: float = 0.5
+    validator_bootstrap_rounds: int = 1
 
 
 class RuntimeLedgerAdapter:
@@ -50,8 +56,12 @@ class RuntimeLedgerAdapter:
         self._candidate_hashes: dict[int, dict[str, str]] = {}
         self._admissions: dict[int, dict[str, bool]] = {}
         self._aggregates: dict[int, str] = {}
+        trust_population = config.validator_eligible_participants or self.validators
+        self.validator_eligible_participants = tuple(sorted(trust_population))
+        if config.selection_strategy == "trust_ranked" and (not config.trust_enabled or config.trust_observation_only):
+            raise ValueError("trust-ranked selection requires enabled, enforcement-capable trust")
         self._trust = (
-            TrustRuntime(experiment_id, self.validators, config.trust_prior_alpha, config.trust_prior_beta)
+            TrustRuntime(experiment_id, trust_population, config.trust_prior_alpha, config.trust_prior_beta)
             if config.trust_enabled
             else None
         )
@@ -71,7 +81,7 @@ class RuntimeLedgerAdapter:
                 role
                 for role, members in (
                     ("contributor", self.contributors),
-                    ("validator", self.validators),
+                    ("validator", self.validator_eligible_participants),
                     ("aggregator", self.contributors),
                 )
                 if node in members
@@ -83,6 +93,11 @@ class RuntimeLedgerAdapter:
             self._ledger.register_participant(self.experiment_id, node, capabilities[node])
         self._capabilities = capabilities
         self._selector = StaticRoundRoleSelector(self.contributors, self.validators, self.contributors)
+        if self.config.selection_strategy == "trust_ranked":
+            self._selector = TrustRankedValidatorSelector(
+                self._selector, self.validator_eligible_participants, self.config.validator_target_count,
+                self.config.validator_minimum_trust, self.config.validator_bootstrap_rounds,
+            )
 
     def _invoke(self, operation, *args, **kwargs):
         if self._ledger is None:
@@ -244,12 +259,14 @@ class RuntimeLedgerAdapter:
                 return {**disabled_ledger_artifact(), "fail_closed": self.config.fail_closed}
             artifact = self._ledger.validation_artifact(self.experiment_id)
             artifact["fail_closed"] = self.config.fail_closed
+            if isinstance(self._selector, TrustRankedValidatorSelector):
+                artifact["selection"] = self._selector.artifact()
             return artifact
 
     def trust_artifact(self) -> dict[str, Any] | None:
         """Return trust only when explicitly enabled, preserving old artifacts."""
         with self._lock:
-            return self._trust.artifact() if self._trust is not None else None
+            return self._trust.artifact(self.config.trust_observation_only) if self._trust is not None else None
 
 
 _runtime_adapter: RuntimeLedgerAdapter | None = None

@@ -59,7 +59,7 @@ class TrustRuntime:
             raise RuntimeError(f"trust rounds must finalize consecutively: expected={len(self._snapshots)}, actual={round_id}")
         validators = tuple(sorted(eligible_validators))
         candidate_ids = tuple(sorted(candidates))
-        if validators != tuple(self._states) or not candidate_ids or len(set(candidate_ids)) != len(candidate_ids):
+        if not validators or not set(validators) <= set(self._states) or not candidate_ids or len(set(candidate_ids)) != len(candidate_ids):
             raise RuntimeError("authoritative validator/candidate set is invalid")
         updates: dict[tuple[int, str, str], TrustUpdateEvidence] = {}
         for raw in decisions:
@@ -117,7 +117,7 @@ class TrustRuntime:
             "post_round": {node: post[node].artifact() for node in sorted(post)},
         }
 
-    def artifact(self) -> dict[str, object]:
+    def artifact(self, observation_only: bool = True) -> dict[str, object]:
         rounds = {}
         for number, snapshot in sorted(self._snapshots.items()):
             rounds[str(number)] = {
@@ -130,7 +130,7 @@ class TrustRuntime:
         return {
             "enabled": True,
             "method": "beta_reputation",
-            "observation_only": True,
+            "observation_only": observation_only,
             "prior": {"alpha": self.prior_alpha, "beta": self.prior_beta},
             "rounds": rounds,
             "final_states": {node: self._states[node].artifact() for node in sorted(self._states)},
