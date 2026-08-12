@@ -33,6 +33,11 @@ class SelectionContext:
     round_number: int
     participant_capabilities: Mapping[str, frozenset[str]]
     previous_state_hash: str | None = None
+    trust_scores: Mapping[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "participant_capabilities", MappingProxyType(dict(self.participant_capabilities)))
+        object.__setattr__(self, "trust_scores", MappingProxyType(dict(sorted(self.trust_scores.items()))))
 
 
 @dataclass(frozen=True)

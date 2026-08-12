@@ -8,6 +8,7 @@ from typing import Any
 
 from brbfl.ledger import BlockchainLedger, create_ledger, disabled_ledger_artifact
 from brbfl.selection.roles import SelectionContext, StaticRoundRoleSelector
+from brbfl.trust import TrustRuntime
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,9 @@ class RuntimeLedgerConfig:
     enabled: bool = False
     backend: str = "memory"
     fail_closed: bool = True
+    trust_enabled: bool = False
+    trust_prior_alpha: float = 1.0
+    trust_prior_beta: float = 1.0
 
 
 class RuntimeLedgerAdapter:
@@ -46,6 +50,11 @@ class RuntimeLedgerAdapter:
         self._candidate_hashes: dict[int, dict[str, str]] = {}
         self._admissions: dict[int, dict[str, bool]] = {}
         self._aggregates: dict[int, str] = {}
+        self._trust = (
+            TrustRuntime(experiment_id, self.validators, config.trust_prior_alpha, config.trust_prior_beta)
+            if config.trust_enabled
+            else None
+        )
         if self._ledger is not None:
             self._initialize()
 
@@ -102,6 +111,9 @@ class RuntimeLedgerAdapter:
                     int(round_number),
                     self._capabilities,
                     self._aggregates.get(int(round_number) - 1),
+                    trust_scores=(
+                        {node: state.score for node, state in self._trust.states.items()} if self._trust is not None else {}
+                    ),
                 )
             )
             self._invoke(self._ledger.commit_round_roles, assignment)
@@ -207,6 +219,23 @@ class RuntimeLedgerAdapter:
                 return
             self._invoke(self._ledger.finalize_round, self.experiment_id, int(round_number))
             self._invoke(self._ledger.verify_round, self.experiment_id, int(round_number))
+            if self._trust is not None and int(round_number) not in self._trust.snapshots:
+                record = self._ledger.get_round_record(self.experiment_id, int(round_number))
+                decisions = [
+                    {
+                        "validator_id": row["validator_id"],
+                        "candidate_id": row["contributor_id"],
+                        "reported_decision": row["admitted"],
+                        "reference_decision": row["evidence"].get("reference_decision") if row.get("evidence") else None,
+                    }
+                    for row in record["decisions"].values()
+                ]
+                self._trust.finalize_round(
+                    int(round_number),
+                    record["assignment"]["selected_validators"],
+                    record["candidates"],
+                    decisions,
+                )
 
     def validation_artifact(self) -> dict[str, Any]:
         """Return deterministic ledger evidence for ``validation.json``."""
@@ -216,6 +245,11 @@ class RuntimeLedgerAdapter:
             artifact = self._ledger.validation_artifact(self.experiment_id)
             artifact["fail_closed"] = self.config.fail_closed
             return artifact
+
+    def trust_artifact(self) -> dict[str, Any] | None:
+        """Return trust only when explicitly enabled, preserving old artifacts."""
+        with self._lock:
+            return self._trust.artifact() if self._trust is not None else None
 
 
 _runtime_adapter: RuntimeLedgerAdapter | None = None

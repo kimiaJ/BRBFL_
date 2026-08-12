@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -71,6 +72,31 @@ class ParticipantSelectionConfig:
 
 
 @dataclass(frozen=True)
+class TrustConfig:
+    """Observation-only validator trust settings."""
+
+    enabled: bool = False
+    method: str = "beta_reputation"
+    prior_alpha: float = 1.0
+    prior_beta: float = 1.0
+    update_source: str = "validator_reference_agreement"
+    observation_only: bool = True
+
+    def __post_init__(self) -> None:
+        """Reject unsupported or numerically invalid trust policies."""
+        if self.method != "beta_reputation":
+            raise ValueError(f"unsupported trust method: {self.method}")
+        if self.update_source != "validator_reference_agreement":
+            raise ValueError(f"unsupported trust update source: {self.update_source}")
+        if not math.isfinite(self.prior_alpha) or self.prior_alpha <= 0:
+            raise ValueError("trust prior_alpha must be finite and greater than zero")
+        if not math.isfinite(self.prior_beta) or self.prior_beta <= 0:
+            raise ValueError("trust prior_beta must be finite and greater than zero")
+        if not self.observation_only:
+            raise ValueError("trust must remain observation_only in this milestone")
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     """Complete runnable experiment settings."""
 
@@ -93,6 +119,7 @@ class ExperimentConfig:
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     blockchain: BlockchainConfig = field(default_factory=BlockchainConfig)
     participant_selection: ParticipantSelectionConfig = field(default_factory=ParticipantSelectionConfig)
+    trust: TrustConfig = field(default_factory=TrustConfig)
 
 
 def _topology(value: str | TopologyType) -> TopologyType:
@@ -109,6 +136,7 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     validation_raw = raw.get("validation", {}) or {}
     blockchain_raw = raw.get("blockchain", {}) or {}
     selection_raw = raw.get("participant_selection", {}) or {}
+    trust_raw = raw.get("trust", {}) or {}
 
     dataset = DatasetConfig(
         name=dataset_raw.get("name", DatasetConfig.name),
@@ -140,6 +168,14 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     participant_selection = ParticipantSelectionConfig(mode=str(selection_raw.get("mode", "static")))
     if participant_selection.mode != "static":
         raise ValueError(f"unsupported participant selection mode: {participant_selection.mode}")
+    trust = TrustConfig(
+        enabled=bool(trust_raw.get("enabled", False)),
+        method=str(trust_raw.get("method", "beta_reputation")),
+        prior_alpha=float(trust_raw.get("prior_alpha", 1)),
+        prior_beta=float(trust_raw.get("prior_beta", 1)),
+        update_source=str(trust_raw.get("update_source", "validator_reference_agreement")),
+        observation_only=bool(trust_raw.get("observation_only", True)),
+    )
 
     return ExperimentConfig(
         nodes=raw.get("nodes", ExperimentConfig.nodes),
@@ -161,4 +197,5 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         validation=validation,
         blockchain=blockchain,
         participant_selection=participant_selection,
+        trust=trust,
     )

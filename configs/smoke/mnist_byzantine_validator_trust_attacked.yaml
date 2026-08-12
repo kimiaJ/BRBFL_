@@ -1,0 +1,41 @@
+nodes: 5
+rounds: 2
+epochs: 1
+seed: 666
+protocol: memory
+framework: pytorch
+aggregator: fedavg
+topology: full
+batch_size: 128
+show_metrics: false
+measure_time: false
+save_csv: true
+output_dir: results/byzantine-validator-trust-validation/attacked
+eligible_trainers: [node-0, node-1, node-2]
+dataset: {name: p2pfl/MNIST, distribution: iid, reduced: true, partition_multiplier: 50}
+validation:
+  enabled: true
+  contributors: [node-0, node-1, node-2]
+  validators: [node-0, node-3, node-4]
+  quorum: 3
+  acceptance_threshold: 2
+  max_l2_norm: .inf
+  reference_reject_candidates: [node-0]
+blockchain:
+  enabled: true
+  backend: memory
+  fail_closed: true
+attack:
+  name: byzantine_validator
+  adversaries: [3, 4]
+  parameters:
+    strategy: invert_reference_vote
+    group_id: mnist-smoke-byzantine-validators
+
+trust:
+  enabled: true
+  method: beta_reputation
+  prior_alpha: 1
+  prior_beta: 1
+  update_source: validator_reference_agreement
+  observation_only: true
