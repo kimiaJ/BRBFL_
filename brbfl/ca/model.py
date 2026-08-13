@@ -182,6 +182,20 @@ class CAStateSnapshot:
         object.__setattr__(self, "participant_states", MappingProxyType(copied))
         object.__setattr__(self, "transition_records", tuple(self.transition_records))
 
+    def verify_hash(self) -> bool:
+        """Verify the snapshot's canonical content hash."""
+        payload = _snapshot_payload(
+            self.experiment_id,
+            self.generation,
+            self.participant_states,
+            self.source_round,
+            self.previous_snapshot_hash,
+            self.policy_hash,
+            self.topology_hash,
+            self.transition_records,
+        )
+        return self.snapshot_hash == canonical_hash("ca-state-snapshot-v1", payload)
+
 
 def _dataclass_payload(value: object) -> dict[str, object]:
     return {field.name: getattr(value, field.name) for field in fields(value)}

@@ -93,3 +93,30 @@ def test_disabled_ca_preserves_artifacts_and_does_not_gate_rounds():
     )
     assert value.ca_artifact() is None
     value.open_round(0, "parent")
+
+
+def test_ca_state_strategy_installs_prior_finalized_assignment():
+    value = RuntimeLedgerAdapter(
+        RuntimeLedgerConfig(
+            enabled=True,
+            trust_enabled=True,
+            trust_observation_only=False,
+            ca_enabled=True,
+            selection_strategy="ca_state",
+        ),
+        "ca-selection-runtime",
+        PARTICIPANTS,
+        PARTICIPANTS,
+        PARTICIPANTS,
+    )
+    value.open_round(0, "parent")
+    assert value.role_assignment(0).selection_source == "static"
+    complete(value)
+    value.open_round(1, "aggregate-0")
+    assignment = value.role_assignment(1)
+    snapshot = value.ca_snapshot_for_round(1)
+    assert assignment.selection_source == "ca_state"
+    assert assignment.source_ca_snapshot_hash == snapshot.snapshot_hash
+    assert assignment.source_trust_hash == value.ca_provenance(0).source_trust_snapshot_hash
+    record = value.ledger.get_round_record(value.experiment_id, 1)
+    assert record["assignment_hash"] == assignment.assignment_hash
