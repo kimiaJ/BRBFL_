@@ -429,9 +429,25 @@ class RuntimeLedgerAdapter:
                         "topology_hash": snapshot.topology_hash,
                         "transition_policy_hash": snapshot.policy_hash,
                         "participant_states": {
-                            node: snapshot.participant_states[node].state.value
-                            for node in snapshot.participant_states
+                            node: {
+                                "state": snapshot.participant_states[node].state.value,
+                                "consecutive_positive": snapshot.participant_states[node].consecutive_positive,
+                                "consecutive_negative": snapshot.participant_states[node].consecutive_negative,
+                                "rounds_in_state": snapshot.participant_states[node].rounds_in_state,
+                                "last_transition_round": snapshot.participant_states[node].last_transition_round,
+                            }
+                            for node in sorted(snapshot.participant_states)
                         },
+                        "transition_records": [
+                            {
+                                "participant_id": record.participant_id,
+                                "previous_state": record.previous_state.value,
+                                "next_state": record.next_state.value,
+                                "evidence_category": record.evidence_category.value,
+                                "reason_code": record.reason_code,
+                            }
+                            for record in snapshot.transition_records
+                        ],
                     }
                     for generation, snapshot in sorted(self._ca_snapshots.items())
                 },
