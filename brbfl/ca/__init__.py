@@ -11,6 +11,7 @@ from brbfl.ca.model import (
     ParticipantCAState,
     ParticipantState,
 )
+from brbfl.ca.runtime import CAEvidenceMapper, CATransitionProvenance, FinalizedTrustEvidenceMapper
 
 __all__ = [
     "CAStateSnapshot",
@@ -22,4 +23,7 @@ __all__ = [
     "NeighborStateSummary",
     "ParticipantCAState",
     "ParticipantState",
+    "CAEvidenceMapper",
+    "CATransitionProvenance",
+    "FinalizedTrustEvidenceMapper",
 ]
