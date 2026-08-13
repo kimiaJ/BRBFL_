@@ -3,9 +3,19 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
+from brbfl.ca import (
+    CAEvidenceMapper,
+    CAStateSnapshot,
+    CATransitionEngine,
+    CATransitionInput,
+    CATransitionPolicy,
+    CATransitionProvenance,
+    FinalizedTrustEvidenceMapper,
+)
 from brbfl.ledger import BlockchainLedger, create_ledger, disabled_ledger_artifact
 from brbfl.selection.roles import RoundRoleAssignment, SelectionContext, StaticRoundRoleSelector, TrustRankedValidatorSelector
 from brbfl.trust import TrustRuntime
@@ -27,6 +37,9 @@ class RuntimeLedgerConfig:
     validator_target_count: int = 0
     validator_minimum_trust: float = 0.5
     validator_bootstrap_rounds: int = 1
+    ca_enabled: bool = False
+    ca_topology: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    ca_policy: CATransitionPolicy = field(default_factory=CATransitionPolicy)
 
 
 class RuntimeLedgerAdapter:
@@ -39,6 +52,8 @@ class RuntimeLedgerAdapter:
         participants: tuple[str, ...],
         contributors: tuple[str, ...],
         validators: tuple[str, ...],
+        *,
+        ca_evidence_mapper: CAEvidenceMapper | None = None,
     ) -> None:
         """Initialize and, when enabled, register the canonical experiment."""
         self.config = config
@@ -57,6 +72,8 @@ class RuntimeLedgerAdapter:
         self._admissions: dict[int, dict[str, bool]] = {}
         self._aggregates: dict[int, str] = {}
         self._assignments: dict[int, RoundRoleAssignment] = {}
+        self._ca_snapshots: dict[int, CAStateSnapshot] = {}
+        self._ca_provenance: dict[int, CATransitionProvenance] = {}
         trust_population = config.validator_eligible_participants or self.validators
         self.validator_eligible_participants = tuple(sorted(trust_population))
         if config.selection_strategy == "trust_ranked" and (not config.trust_enabled or config.trust_observation_only):
@@ -66,6 +83,17 @@ class RuntimeLedgerAdapter:
             if config.trust_enabled
             else None
         )
+        if config.ca_enabled and (not config.enabled or not config.trust_enabled):
+            raise ValueError("CA requires enabled runtime ledger and finalized trust evidence")
+        if config.ca_enabled:
+            topology = config.ca_topology or {
+                node: tuple(other for other in self.participants if other != node) for node in self.participants
+            }
+            self._ca_topology = {node: tuple(neighbors) for node, neighbors in topology.items()}
+            self._ca_mapper = ca_evidence_mapper or FinalizedTrustEvidenceMapper()
+            self._ca_snapshots[0] = CATransitionEngine.initialize(
+                experiment_id, self.participants, config.ca_policy, self._ca_topology
+            )
         if self._ledger is not None:
             self._initialize()
 
@@ -121,12 +149,18 @@ class RuntimeLedgerAdapter:
                 return
             if self._ledger is None:
                 return
+            round_number = int(round_number)
+            ca_snapshot = None
+            if self.config.ca_enabled:
+                ca_snapshot = self._ca_snapshots.get(round_number)
+                if ca_snapshot is None or ca_snapshot.generation != round_number:
+                    raise RuntimeError(f"verified CA snapshot is unavailable for round selection: {round_number}")
             assignment = self._selector.select_roles(
                 SelectionContext(
                     self.experiment_id,
-                    int(round_number),
+                    round_number,
                     self._capabilities,
-                    self._aggregates.get(int(round_number) - 1),
+                    ca_snapshot.snapshot_hash if ca_snapshot is not None else self._aggregates.get(round_number - 1),
                     trust_scores=(
                         {node: state.score for node, state in self._trust.states.items()} if self._trust is not None else {}
                     ),
@@ -246,8 +280,11 @@ class RuntimeLedgerAdapter:
         with self._lock:
             if self._ledger is None:
                 return
-            self._invoke(self._ledger.finalize_round, self.experiment_id, int(round_number))
-            self._invoke(self._ledger.verify_round, self.experiment_id, int(round_number))
+            round_number = int(round_number)
+            self._invoke(self._ledger.finalize_round, self.experiment_id, round_number)
+            verified = self._invoke(self._ledger.verify_round, self.experiment_id, round_number)
+            if self.config.ca_enabled and verified is not True:
+                raise RuntimeError("CA/trust cannot consume an unverified ledger round")
             if self._trust is not None and int(round_number) not in self._trust.snapshots:
                 record = self._ledger.get_round_record(self.experiment_id, int(round_number))
                 decisions = [
@@ -265,6 +302,100 @@ class RuntimeLedgerAdapter:
                     record["candidates"],
                     decisions,
                 )
+            if self.config.ca_enabled and round_number not in self._ca_provenance:
+                self._finalize_ca(round_number)
+
+    def _finalize_ca(self, round_number: int) -> None:
+        """Derive and atomically commit the next generation from finalized inputs."""
+        assert self._ledger is not None and self._trust is not None
+        previous = self._ca_snapshots.get(round_number)
+        trust = self._trust.snapshots.get(round_number)
+        if previous is None or previous.generation != round_number or previous.source_round not in (None, round_number - 1):
+            raise RuntimeError("CA source snapshot is absent or stale")
+        if trust is None or trust.round_id != round_number or trust.experiment_id != self.experiment_id:
+            raise RuntimeError("trust snapshot is absent, unverified, or stale")
+        ledger_hash = self._ledger.final_event_chain_hash
+        if not ledger_hash:
+            raise RuntimeError("finalized ledger hash is absent")
+        categories = self._ca_mapper.categories(self.participants, trust)
+        trust_scores = {
+            node: trust.post_round[node].score if node in trust.post_round else 0.5 for node in self.participants
+        }
+        result = CATransitionEngine.transition(
+            previous,
+            CATransitionInput(round_number, trust_scores, categories, self._ca_topology),
+            self.config.ca_policy,
+        )
+        provenance = CATransitionProvenance(
+            round_number,
+            ledger_hash,
+            trust.snapshot_sha256,
+            result.topology_hash,
+            previous.snapshot_hash,
+            self.config.ca_policy.policy_hash,
+            result.snapshot_hash,
+        )
+        payload = {**provenance.artifact(), "transition_records": [
+            {
+                "participant_id": record.participant_id,
+                "previous_state": record.previous_state.value,
+                "next_state": record.next_state.value,
+                "evidence": record.evidence_category.value,
+                "reason_code": record.reason_code,
+            }
+            for record in result.transition_records
+        ]}
+        self._invoke(self._ledger.commit_ca_transition, self.experiment_id, round_number, payload)
+        self._ca_snapshots[result.generation] = result
+        self._ca_provenance[round_number] = provenance
+
+    def ca_snapshot(self, generation: int) -> CAStateSnapshot:
+        """Return an immutable generation snapshot, failing closed if unavailable."""
+        with self._lock:
+            try:
+                return self._ca_snapshots[int(generation)]
+            except KeyError as exc:
+                raise RuntimeError(f"CA snapshot is unavailable: generation={generation}") from exc
+
+    def ca_snapshot_for_round(self, round_number: int) -> CAStateSnapshot:
+        """Return the snapshot used to select and execute ``round_number``."""
+        return self.ca_snapshot(round_number)
+
+    def ca_provenance(self, source_round: int) -> CATransitionProvenance:
+        """Return immutable provenance retained for a finalized source round."""
+        with self._lock:
+            try:
+                return self._ca_provenance[int(source_round)]
+            except KeyError as exc:
+                raise RuntimeError(f"CA transition is unavailable: source_round={source_round}") from exc
+
+    def ca_artifact(self) -> dict[str, object] | None:
+        """Return deterministic CA evidence only when CA is explicitly enabled."""
+        with self._lock:
+            if not self.config.ca_enabled:
+                return None
+            return {
+                "enabled": True,
+                "mapping_policy": "all_agree=positive;any_disagreement=severe;unevaluated=neutral",
+                "generations": {
+                    str(generation): {
+                        "source_round": snapshot.source_round,
+                        "snapshot_hash": snapshot.snapshot_hash,
+                        "previous_snapshot_hash": snapshot.previous_snapshot_hash,
+                        "topology_hash": snapshot.topology_hash,
+                        "transition_policy_hash": snapshot.policy_hash,
+                        "participant_states": {
+                            node: snapshot.participant_states[node].state.value
+                            for node in snapshot.participant_states
+                        },
+                    }
+                    for generation, snapshot in sorted(self._ca_snapshots.items())
+                },
+                "transitions": {
+                    str(source_round): provenance.artifact()
+                    for source_round, provenance in sorted(self._ca_provenance.items())
+                },
+            }
 
     def validation_artifact(self) -> dict[str, Any]:
         """Return deterministic ledger evidence for ``validation.json``."""
