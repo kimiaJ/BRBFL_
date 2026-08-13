@@ -17,7 +17,14 @@ from brbfl.ca import (
     FinalizedTrustEvidenceMapper,
 )
 from brbfl.ledger import BlockchainLedger, create_ledger, disabled_ledger_artifact
-from brbfl.selection.roles import RoundRoleAssignment, SelectionContext, StaticRoundRoleSelector, TrustRankedValidatorSelector
+from brbfl.selection.roles import (
+    CARoleSelectionPolicy,
+    CAStateRoleSelector,
+    RoundRoleAssignment,
+    SelectionContext,
+    StaticRoundRoleSelector,
+    TrustRankedValidatorSelector,
+)
 from brbfl.trust import TrustRuntime
 
 
@@ -40,6 +47,11 @@ class RuntimeLedgerConfig:
     ca_enabled: bool = False
     ca_topology: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     ca_policy: CATransitionPolicy = field(default_factory=CATransitionPolicy)
+    ca_suspicious_contributors: bool = True
+    ca_minimum_contributors: int = 1
+    ca_minimum_validators: int = 1
+    ca_validator_quorum: int = 1
+    ca_bootstrap_rounds: int = 1
 
 
 class RuntimeLedgerAdapter:
@@ -85,6 +97,10 @@ class RuntimeLedgerAdapter:
         )
         if config.ca_enabled and (not config.enabled or not config.trust_enabled):
             raise ValueError("CA requires enabled runtime ledger and finalized trust evidence")
+        if config.selection_strategy == "ca_state" and not config.ca_enabled:
+            raise ValueError("CA-state selection requires enabled CA")
+        if config.selection_strategy not in ("static", "trust_ranked", "ca_state"):
+            raise ValueError(f"unsupported role selection strategy: {config.selection_strategy}")
         if config.ca_enabled:
             topology = config.ca_topology or {
                 node: tuple(other for other in self.participants if other != node) for node in self.participants
@@ -127,6 +143,19 @@ class RuntimeLedgerAdapter:
                 self._selector, self.validator_eligible_participants, self.config.validator_target_count,
                 self.config.validator_minimum_trust, self.config.validator_bootstrap_rounds,
             )
+        elif self.config.selection_strategy == "ca_state":
+            self._selector = CAStateRoleSelector(
+                self._selector,
+                CARoleSelectionPolicy(
+                    contributor_target_count=len(self.contributors),
+                    validator_target_count=len(self.validators),
+                    minimum_contributors=self.config.ca_minimum_contributors,
+                    minimum_validators=self.config.ca_minimum_validators,
+                    validator_quorum=self.config.ca_validator_quorum,
+                    suspicious_contributors=self.config.ca_suspicious_contributors,
+                    bootstrap_rounds=self.config.ca_bootstrap_rounds,
+                ),
+            )
 
     def _invoke(self, operation, *args, **kwargs):
         if self._ledger is None:
@@ -162,7 +191,22 @@ class RuntimeLedgerAdapter:
                     self._capabilities,
                     ca_snapshot.snapshot_hash if ca_snapshot is not None else self._aggregates.get(round_number - 1),
                     trust_scores=(
-                        {node: state.score for node, state in self._trust.states.items()} if self._trust is not None else {}
+                        (
+                            {
+                                node: self._trust.snapshots[round_number - 1].post_round[node].score
+                                if node in self._trust.snapshots[round_number - 1].post_round else 0.5
+                                for node in self.participants
+                            }
+                            if round_number > 0 and round_number - 1 in self._trust.snapshots
+                            else {node: state.score for node, state in self._trust.states.items()}
+                        )
+                        if self._trust is not None else {}
+                    ),
+                    ca_snapshot=ca_snapshot,
+                    source_trust_round=(ca_snapshot.source_round if ca_snapshot is not None and round_number > 0 else None),
+                    source_trust_hash=(
+                        self._ca_provenance[round_number - 1].source_trust_snapshot_hash
+                        if round_number > 0 and round_number - 1 in self._ca_provenance else None
                     ),
                 )
             )
