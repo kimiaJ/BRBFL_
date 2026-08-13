@@ -1,0 +1,17 @@
+experiment_id: ca-4-smoke
+nodes: 5
+rounds: 6
+seed: 666
+producing_commit: CA-4
+topology: full
+partitions: {dataset: p2pfl/MNIST, distribution: iid, reduced: true, partition_multiplier: 50}
+initial_model: {framework: pytorch, architecture: mnist-mlp, initialization_seed: 666}
+aggregation: {method: fedavg}
+validation_policy: {quorum: 3, acceptance_threshold: 2, strategy: reference_vote}
+trust_policy: {method: beta_reputation, prior_alpha: 1, prior_beta: 1}
+ca_policy: {promotion_positive_rounds: 3, recovery_positive_rounds: 3, exclusion_negative_rounds: 2, excluded_cooldown_rounds: 3, trusted_neighbor_min_count: 0, trusted_neighbor_min_fraction: 0.0, promotion_min_trust: 0.7, recovery_min_trust: 0.6, recovery_enabled: false, require_undirected_topology: true, allow_self_neighbors: false}
+initial_ca_snapshot: observation
+candidate_assignments: [node-0, node-1, node-2]
+evaluable_validators: [node-0, node-3, node-4]
+attack: {name: byzantine_validator, adversaries: [3, 4], parameters: {strategy: invert_reference_vote}}
+output_dir: results/byzantine-validator-ca/attacked
