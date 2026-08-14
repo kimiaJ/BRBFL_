@@ -39,6 +39,7 @@ class ParticipantCAState:
     consecutive_negative_rounds: int = 0
     rounds_in_state: int = 0
     last_transition_round: int | None = None
+    unresolved_severe_since_round: int | None = None
 
     def __post_init__(self) -> None:
         """Validate participant state invariants."""
@@ -59,6 +60,17 @@ class ParticipantCAState:
             or self.last_transition_round < 0
         ):
             raise ValueError("last_transition_round must be a non-negative integer or None")
+        if self.unresolved_severe_since_round is not None and (
+            isinstance(self.unresolved_severe_since_round, bool)
+            or not isinstance(self.unresolved_severe_since_round, int)
+            or self.unresolved_severe_since_round < 0
+        ):
+            raise ValueError("unresolved_severe_since_round must be a non-negative integer or None")
+        if self.unresolved_severe_since_round is not None:
+            if self.state not in (ParticipantState.SUSPICIOUS, ParticipantState.EXCLUDED):
+                raise ValueError("unresolved severe provenance requires suspicious or excluded state")
+            if self.last_transition_round is None or self.unresolved_severe_since_round > self.last_transition_round:
+                raise ValueError("unresolved severe provenance must be backed by transition history")
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +80,7 @@ class CATransitionPolicy:
     promotion_positive_rounds: int = 3
     recovery_positive_rounds: int = 3
     exclusion_negative_rounds: int = 2
+    severe_suspicious_probation_rounds: int = 1
     excluded_cooldown_rounds: int = 3
     trusted_neighbor_min_count: int = 1
     trusted_neighbor_min_fraction: float = 0.5
@@ -84,6 +97,7 @@ class CATransitionPolicy:
             self.promotion_positive_rounds,
             self.recovery_positive_rounds,
             self.exclusion_negative_rounds,
+            self.severe_suspicious_probation_rounds,
             self.excluded_cooldown_rounds,
             self.trusted_neighbor_min_count,
         )
@@ -133,6 +147,8 @@ class CATransitionRecord:
     reason_code: str
     policy_hash: str
     previous_snapshot_hash: str
+    previous_unresolved_severe_since_round: int | None
+    next_unresolved_severe_since_round: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +296,13 @@ class CATransitionEngine:
             negative = old.consecutive_negative_rounds + 1 if evidence in (EvidenceCategory.NEGATIVE, EvidenceCategory.SEVERE) else 0
             next_state, reason = _next_state(old, evidence, float(trust), positive, negative, summary, policy)
             changed = next_state is not old.state
+            unresolved_severe = old.unresolved_severe_since_round
+            if old.state in (ParticipantState.OBSERVATION, ParticipantState.TRUSTED) and (
+                evidence is EvidenceCategory.SEVERE and next_state is ParticipantState.SUSPICIOUS
+            ):
+                unresolved_severe = transition_input.source_round
+            elif reason in {"suspicious_recovered", "excluded_cooldown_recovery"}:
+                unresolved_severe = None
             state = ParticipantCAState(
                 participant_id,
                 next_state,
@@ -287,6 +310,7 @@ class CATransitionEngine:
                 negative,
                 0 if changed else old.rounds_in_state + 1,
                 transition_input.source_round if changed else old.last_transition_round,
+                unresolved_severe,
             )
             states[participant_id] = state
             records.append(
@@ -305,6 +329,8 @@ class CATransitionEngine:
                     reason,
                     policy.policy_hash,
                     previous.snapshot_hash,
+                    old.unresolved_severe_since_round,
+                    unresolved_severe,
                 )
             )
         record_tuple = tuple(records)
@@ -371,7 +397,7 @@ def _topology_hash(topology: Mapping[str, tuple[str, ...]]) -> str:
 
 
 def _neighbor_summary(neighbors: tuple[str, ...], states: Mapping[str, ParticipantCAState]) -> NeighborStateSummary:
-    counts = {state: 0 for state in ParticipantState}
+    counts = dict.fromkeys(ParticipantState, 0)
     for neighbor in neighbors:
         counts[states[neighbor].state] += 1
     total = len(neighbors)
@@ -420,12 +446,15 @@ def _next_state(
         if evidence in (EvidenceCategory.NEGATIVE, EvidenceCategory.SEVERE) and negative >= policy.exclusion_negative_rounds:
             return ParticipantState.EXCLUDED, "suspicious_repeated_negative"
         if (
-            evidence is EvidenceCategory.POSITIVE
+            policy.recovery_enabled
+            and evidence is EvidenceCategory.POSITIVE
             and positive >= policy.recovery_positive_rounds
             and trust >= policy.recovery_min_trust
             and _supported(neighbors, policy)
         ):
             return ParticipantState.OBSERVATION, "suspicious_recovered"
+        if old.unresolved_severe_since_round is not None and old.rounds_in_state + 1 >= policy.severe_suspicious_probation_rounds:
+            return ParticipantState.EXCLUDED, "suspicious_severe_probation_expired"
     elif (
         policy.recovery_enabled
         and old.rounds_in_state >= policy.excluded_cooldown_rounds

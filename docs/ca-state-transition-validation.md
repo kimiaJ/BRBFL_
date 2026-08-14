@@ -14,6 +14,11 @@ unevaluated `node-1` and `node-2` remain under observation. In the clean run,
 evaluated nodes 0, 3, and 4 become trusted in round 2 while unevaluated nodes are
 never promoted.
 
+Only round 0 supplies severe validator evidence. The suspicious cells are removed
+from validator eligibility, so round 1 correctly supplies neutral evidence; the
+policy-configured one-round severe-suspicion probation retains the unresolved
+severe provenance and performs the exclusion. CA-4 does not invent a second vote.
+
 The artifact generator records finalized trust/evidence, all transition records,
 snapshot provenance, eligibility rules, role assignments, aggregation identities,
 and consensus hashes. The comparator regenerates each input artifact before it

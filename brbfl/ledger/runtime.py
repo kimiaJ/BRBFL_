@@ -107,9 +107,7 @@ class RuntimeLedgerAdapter:
             }
             self._ca_topology = {node: tuple(neighbors) for node, neighbors in topology.items()}
             self._ca_mapper = ca_evidence_mapper or FinalizedTrustEvidenceMapper()
-            self._ca_snapshots[0] = CATransitionEngine.initialize(
-                experiment_id, self.participants, config.ca_policy, self._ca_topology
-            )
+            self._ca_snapshots[0] = CATransitionEngine.initialize(experiment_id, self.participants, config.ca_policy, self._ca_topology)
         if self._ledger is not None:
             self._initialize()
 
@@ -140,8 +138,11 @@ class RuntimeLedgerAdapter:
         self._selector = StaticRoundRoleSelector(self.contributors, self.validators, self.contributors)
         if self.config.selection_strategy == "trust_ranked":
             self._selector = TrustRankedValidatorSelector(
-                self._selector, self.validator_eligible_participants, self.config.validator_target_count,
-                self.config.validator_minimum_trust, self.config.validator_bootstrap_rounds,
+                self._selector,
+                self.validator_eligible_participants,
+                self.config.validator_target_count,
+                self.config.validator_minimum_trust,
+                self.config.validator_bootstrap_rounds,
             )
         elif self.config.selection_strategy == "ca_state":
             self._selector = CAStateRoleSelector(
@@ -194,19 +195,22 @@ class RuntimeLedgerAdapter:
                         (
                             {
                                 node: self._trust.snapshots[round_number - 1].post_round[node].score
-                                if node in self._trust.snapshots[round_number - 1].post_round else 0.5
+                                if node in self._trust.snapshots[round_number - 1].post_round
+                                else 0.5
                                 for node in self.participants
                             }
                             if round_number > 0 and round_number - 1 in self._trust.snapshots
                             else {node: state.score for node, state in self._trust.states.items()}
                         )
-                        if self._trust is not None else {}
+                        if self._trust is not None
+                        else {}
                     ),
                     ca_snapshot=ca_snapshot,
                     source_trust_round=(ca_snapshot.source_round if ca_snapshot is not None and round_number > 0 else None),
                     source_trust_hash=(
                         self._ca_provenance[round_number - 1].source_trust_snapshot_hash
-                        if round_number > 0 and round_number - 1 in self._ca_provenance else None
+                        if round_number > 0 and round_number - 1 in self._ca_provenance
+                        else None
                     ),
                 )
             )
@@ -301,11 +305,7 @@ class RuntimeLedgerAdapter:
                 if admission is None:
                     self._invoke(lambda: (_ for _ in ()).throw(RuntimeError("aggregate observed before admission finalization")))
                     return
-                inputs = {
-                    node: self._candidate_hashes[round_number][node]
-                    for node, admitted in admission.items()
-                    if admitted
-                }
+                inputs = {node: self._candidate_hashes[round_number][node] for node, admitted in admission.items() if admitted}
                 self._invoke(self._ledger.commit_aggregate, self.experiment_id, round_number, inputs, aggregate_hash)
                 self._aggregates[round_number] = aggregate_hash
             elif self._aggregates[round_number] != aggregate_hash:
@@ -362,9 +362,7 @@ class RuntimeLedgerAdapter:
         if not ledger_hash:
             raise RuntimeError("finalized ledger hash is absent")
         categories = self._ca_mapper.categories(self.participants, trust)
-        trust_scores = {
-            node: trust.post_round[node].score if node in trust.post_round else 0.5 for node in self.participants
-        }
+        trust_scores = {node: trust.post_round[node].score if node in trust.post_round else 0.5 for node in self.participants}
         result = CATransitionEngine.transition(
             previous,
             CATransitionInput(round_number, trust_scores, categories, self._ca_topology),
@@ -379,16 +377,19 @@ class RuntimeLedgerAdapter:
             self.config.ca_policy.policy_hash,
             result.snapshot_hash,
         )
-        payload = {**provenance.artifact(), "transition_records": [
-            {
-                "participant_id": record.participant_id,
-                "previous_state": record.previous_state.value,
-                "next_state": record.next_state.value,
-                "evidence": record.evidence_category.value,
-                "reason_code": record.reason_code,
-            }
-            for record in result.transition_records
-        ]}
+        payload = {
+            **provenance.artifact(),
+            "transition_records": [
+                {
+                    "participant_id": record.participant_id,
+                    "previous_state": record.previous_state.value,
+                    "next_state": record.next_state.value,
+                    "evidence": record.evidence_category.value,
+                    "reason_code": record.reason_code,
+                }
+                for record in result.transition_records
+            ],
+        }
         self._invoke(self._ledger.commit_ca_transition, self.experiment_id, round_number, payload)
         self._ca_snapshots[result.generation] = result
         self._ca_provenance[round_number] = provenance
@@ -435,6 +436,7 @@ class RuntimeLedgerAdapter:
                                 "consecutive_negative": snapshot.participant_states[node].consecutive_negative_rounds,
                                 "rounds_in_state": snapshot.participant_states[node].rounds_in_state,
                                 "last_transition_round": snapshot.participant_states[node].last_transition_round,
+                                "unresolved_severe_since_round": snapshot.participant_states[node].unresolved_severe_since_round,
                             }
                             for node in sorted(snapshot.participant_states)
                         },
@@ -452,8 +454,7 @@ class RuntimeLedgerAdapter:
                     for generation, snapshot in sorted(self._ca_snapshots.items())
                 },
                 "transitions": {
-                    str(source_round): provenance.artifact()
-                    for source_round, provenance in sorted(self._ca_provenance.items())
+                    str(source_round): provenance.artifact() for source_round, provenance in sorted(self._ca_provenance.items())
                 },
             }
 

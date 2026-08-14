@@ -33,17 +33,23 @@ def test_causal_comparison_and_exact_paths(pair):
     assert result["verification_result"] is True
     assert result["causal_status"] == "proven_ca_state_transitions_excluded_byzantine_participants"
     assert result["attacked_state_paths"]["node-3"][:2] == ["suspicious", "excluded"]
+    assert attacked["rounds"][0]["authoritative_evidence_categories"]["node-3"] == "severe"
+    assert attacked["rounds"][1]["authoritative_evidence_categories"]["node-3"] == "neutral"
+    assert attacked["rounds"][1]["transition_records"][3]["reason_code"] == "suspicious_severe_probation_expired"
     assert clean["rounds"][2]["next_ca_states"]["node-0"] == "trusted"
     assert clean["rounds"][2]["next_ca_states"]["node-1"] == "observation"
 
 
-@pytest.mark.parametrize("path,value", [
-    (("rounds", 0, "transition_records"), []),
-    (("rounds", 0, "source_ca_hash"), "forged"),
-    (("rounds", 0, "source_trust_hash"), "unverified"),
-    (("rounds", 0, "role_assignment", "source_ca_snapshot_hash"), None),
-    (("rounds", 0, "transition_records", 0, "reason_code"), "altered"),
-])
+@pytest.mark.parametrize(
+    "path,value",
+    [
+        (("rounds", 0, "transition_records"), []),
+        (("rounds", 0, "source_ca_hash"), "forged"),
+        (("rounds", 0, "source_trust_hash"), "unverified"),
+        (("rounds", 0, "role_assignment", "source_ca_snapshot_hash"), None),
+        (("rounds", 0, "transition_records", 0, "reason_code"), "altered"),
+    ],
+)
 def test_forged_evidence_is_rejected(pair, path, value):
     """Any missing or altered causal evidence invalidates the artifact."""
     artifact = copy.deepcopy(pair[1])

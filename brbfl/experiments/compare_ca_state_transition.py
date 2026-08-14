@@ -38,18 +38,22 @@ def generate_artifact(config: dict[str, Any]) -> dict[str, Any]:
     topology = {node: tuple(peer for peer in NODES if peer != node) for node in NODES}
     snapshot = CATransitionEngine.initialize(config["experiment_id"], NODES, policy, topology)
     initial_hash = snapshot.snapshot_hash
-    alpha = {node: 1 for node in NODES}
-    beta = {node: 1 for node in NODES}
+    alpha = dict.fromkeys(NODES, 1)
+    beta = dict.fromkeys(NODES, 1)
     rounds = []
     previous_ledger_hash = canonical_hash("ledger-genesis/v1", controlled)
     for number in range(config["rounds"]):
         previous = snapshot
-        # The validated intervention supplies two independently finalized bad-vote
-        # batches.  The second is finalized in round 1 even though CA already
-        # removed the senders from that round's validator assignment.
+        # Quarantined suspicious validators are unevaluable after the one bad-vote
+        # batch; retained severe provenance drives policy probation, not fake evidence.
         evidence = {
-            node: EvidenceCategory.SEVERE if attacked and node in adversaries and number < 2 else
-            EvidenceCategory.POSITIVE if node in config["evaluable_validators"] else EvidenceCategory.NEUTRAL
+            node: EvidenceCategory.SEVERE
+            if attacked and node in adversaries and number == 0
+            else EvidenceCategory.NEUTRAL
+            if previous.participant_states[node].state.value in {"suspicious", "excluded"}
+            else EvidenceCategory.POSITIVE
+            if node in config["evaluable_validators"]
+            else EvidenceCategory.NEUTRAL
             for node in NODES
         }
         for node, category in evidence.items():
@@ -67,33 +71,51 @@ def generate_artifact(config: dict[str, Any]) -> dict[str, Any]:
         validators = eligible_validators[:3]
         contributors = eligible_all[:3]
         assignment = {
-            "round": number + 1, "selected_contributors": contributors, "selected_validators": validators,
-            "source_ca_generation": snapshot.generation, "source_ca_snapshot_hash": snapshot.snapshot_hash,
-            "source_trust_round": number, "source_trust_hash": trust_hash,
+            "round": number + 1,
+            "selected_contributors": contributors,
+            "selected_validators": validators,
+            "source_ca_generation": snapshot.generation,
+            "source_ca_snapshot_hash": snapshot.snapshot_hash,
+            "source_trust_round": number,
+            "source_trust_hash": trust_hash,
             "eligibility_rules": {"validator": ["trusted", "observation"], "all_roles_exclude": ["excluded"]},
         }
         assignment_hash = canonical_hash("ca-role-assignment/v1", assignment)
         records = _json([asdict(record) for record in snapshot.transition_records])
-        rounds.append({
-            "round": number, "selected_contributors": contributors, "selected_validators": validators,
-            "topology_hash": snapshot.topology_hash, "finalized_trust": trust,
-            "authoritative_evidence_categories": {node: value.value for node, value in evidence.items()},
-            "previous_ca_states": {node: value.state.value for node, value in previous.participant_states.items()},
-            "transition_records": records, "next_ca_states": states,
-            "suspicious_identities": sorted(node for node, state in states.items() if state == "suspicious"),
-            "excluded_identities": sorted(node for node, state in states.items() if state == "excluded"),
-            "source_ledger_hash": ledger_hash, "source_trust_hash": trust_hash,
-            "source_ca_hash": previous.snapshot_hash, "resulting_ca_snapshot_hash": snapshot.snapshot_hash,
-            "role_assignment": assignment, "role_assignment_hash": assignment_hash,
-            "aggregation_contributors": contributors,
-            "final_model_hash": canonical_hash("model/v1", {"round": number, "contributors": contributors}),
-            "consensus": {"model": True, "ledger": True, "trust": True, "ca": True, "roles": True},
-        })
+        rounds.append(
+            {
+                "round": number,
+                "selected_contributors": contributors,
+                "selected_validators": validators,
+                "topology_hash": snapshot.topology_hash,
+                "finalized_trust": trust,
+                "authoritative_evidence_categories": {node: value.value for node, value in evidence.items()},
+                "previous_ca_states": {node: value.state.value for node, value in previous.participant_states.items()},
+                "transition_records": records,
+                "next_ca_states": states,
+                "suspicious_identities": sorted(node for node, state in states.items() if state == "suspicious"),
+                "excluded_identities": sorted(node for node, state in states.items() if state == "excluded"),
+                "source_ledger_hash": ledger_hash,
+                "source_trust_hash": trust_hash,
+                "source_ca_hash": previous.snapshot_hash,
+                "resulting_ca_snapshot_hash": snapshot.snapshot_hash,
+                "role_assignment": assignment,
+                "role_assignment_hash": assignment_hash,
+                "aggregation_contributors": contributors,
+                "final_model_hash": canonical_hash("model/v1", {"round": number, "contributors": contributors}),
+                "consensus": {"model": True, "ledger": True, "trust": True, "ca": True, "roles": True},
+            }
+        )
         previous_ledger_hash = ledger_hash
     artifact = {
-        "schema_version": SCHEMA, "configuration": copy.deepcopy(config), "controlled_fields": controlled,
-        "intervention": config.get("attack", {}), "initial_ca_snapshot_hash": initial_hash,
-        "ca_policy_hash": policy.policy_hash, "rounds": rounds, "verification_result": True,
+        "schema_version": SCHEMA,
+        "configuration": copy.deepcopy(config),
+        "controlled_fields": controlled,
+        "intervention": config.get("attack", {}),
+        "initial_ca_snapshot_hash": initial_hash,
+        "ca_policy_hash": policy.policy_hash,
+        "rounds": rounds,
+        "verification_result": True,
     }
     artifact["artifact_sha256"] = canonical_hash("ca-state-experiment-artifact/v1", artifact)
     assert config == original
@@ -132,12 +154,12 @@ def compare_evidence(clean: dict[str, Any], attacked: dict[str, Any]) -> dict[st
     paths = {node: [row["next_ca_states"][node] for row in right["rounds"]] for node in NODES}
     assertions = {
         "authoritative_negative_evidence": all(
-            right["rounds"][i]["authoritative_evidence_categories"][node] == "severe"
-            for node in adversaries for i in (0, 1)
+            right["rounds"][0]["authoritative_evidence_categories"][node] == "severe"
+            and right["rounds"][1]["authoritative_evidence_categories"][node] == "neutral"
+            for node in adversaries
         ),
         "finalized_trust_diverged": all(
-            right["rounds"][1]["finalized_trust"][node] < left["rounds"][1]["finalized_trust"][node]
-            for node in adversaries
+            right["rounds"][1]["finalized_trust"][node] < left["rounds"][1]["finalized_trust"][node] for node in adversaries
         ),
         "exact_attacked_path": all(paths[node][:2] == ["suspicious", "excluded"] for node in adversaries),
         "honest_not_negative": all("suspicious" not in paths[node] and "excluded" not in paths[node] for node in set(NODES) - adversaries),
@@ -146,25 +168,32 @@ def compare_evidence(clean: dict[str, Any], attacked: dict[str, Any]) -> dict[st
         ),
         "excluded_all_roles_ineligible": all(
             node not in right["rounds"][1]["role_assignment"][role]
-            for node in adversaries for role in ("selected_validators", "selected_contributors")
+            for node in adversaries
+            for role in ("selected_validators", "selected_contributors")
         ),
         "clean_stable": all(row["next_ca_states"][node] not in {"suspicious", "excluded"} for row in left["rounds"] for node in NODES),
         "neutral_not_promoted": all(
             row["next_ca_states"][node] == "observation"
-            for row in left["rounds"] for node in set(NODES) - set(left["configuration"]["evaluable_validators"])
+            for row in left["rounds"]
+            for node in set(NODES) - set(left["configuration"]["evaluable_validators"])
         ),
         "ca_snapshot_consumed": all(
-            row["role_assignment"]["source_ca_snapshot_hash"] == row["resulting_ca_snapshot_hash"]
-            for row in right["rounds"]
+            row["role_assignment"]["source_ca_snapshot_hash"] == row["resulting_ca_snapshot_hash"] for row in right["rounds"]
         ),
     }
     if not all(assertions.values()):
         raise AssertionError("causal rotation/exclusion did not occur")
     result = {
-        "schema_version": "brbfl.ca-state-comparison/v1", "verification_result": True, "causal_status": STATUS,
-        "controlled_fields": left["controlled_fields"], "assertions": assertions, "attacked_state_paths": paths,
+        "schema_version": "brbfl.ca-state-comparison/v1",
+        "verification_result": True,
+        "causal_status": STATUS,
+        "controlled_fields": left["controlled_fields"],
+        "assertions": assertions,
+        "attacked_state_paths": paths,
         "distinctions": {
-            "trust_only_exclusion": False, "ca_state_transition": True, "ca_driven_role_ineligibility": True,
+            "trust_only_exclusion": False,
+            "ca_state_transition": True,
+            "ca_driven_role_ineligibility": True,
             "proof": "verified source_ca_snapshot_hash plus explicit CA eligibility rules",
         },
     }
