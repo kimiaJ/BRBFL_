@@ -35,7 +35,7 @@ def evolve(snapshot, policy, evidence, trusts=None, graph=None, round_number=0):
         snapshot,
         CATransitionInput(
             round_number,
-            trusts or {participant_id: 0.8 for participant_id in snapshot.participant_states},
+            trusts or dict.fromkeys(snapshot.participant_states, 0.8),
             evidence,
             graph or topology(*snapshot.participant_states),
         ),
@@ -59,7 +59,7 @@ def test_promotion_requires_history_trust_and_neighborhood_support() -> None:
         "c": ParticipantCAState("c"),
     }
     snapshot = initialized(policy, states)
-    positive = {key: EvidenceCategory.POSITIVE for key in states}
+    positive = dict.fromkeys(states, EvidenceCategory.POSITIVE)
     snapshot = evolve(snapshot, policy, positive)
     assert snapshot.participant_states["a"].state is ParticipantState.OBSERVATION
     snapshot = evolve(snapshot, policy, positive, round_number=1)
@@ -89,6 +89,83 @@ def test_negative_degradation_severe_and_exclusion() -> None:
     assert snapshot.participant_states["c"].state is ParticipantState.EXCLUDED
 
 
+def test_severe_probation_retains_provenance_across_neutral_quarantine() -> None:
+    """A validator cannot evade its severe finding by becoming unevaluable."""
+    policy = CATransitionPolicy(severe_suspicious_probation_rounds=1)
+    snapshot = initialized(policy)
+    severe = dict.fromkeys(snapshot.participant_states, EvidenceCategory.NEUTRAL)
+    severe["a"] = EvidenceCategory.SEVERE
+    suspicious = evolve(snapshot, policy, severe)
+    state = suspicious.participant_states["a"]
+    assert state.state is ParticipantState.SUSPICIOUS
+    assert state.unresolved_severe_since_round == 0
+    assert snapshot.participant_states["a"].unresolved_severe_since_round is None
+
+    neutral = dict.fromkeys(snapshot.participant_states, EvidenceCategory.NEUTRAL)
+    excluded = evolve(suspicious, policy, neutral, round_number=1)
+    assert excluded.participant_states["a"].state is ParticipantState.EXCLUDED
+    assert excluded.participant_states["a"].unresolved_severe_since_round == 0
+    assert excluded.participant_states["a"].consecutive_negative_rounds == 0
+    assert excluded.transition_records[0].reason_code == "suspicious_severe_probation_expired"
+
+
+def test_nonsevere_suspicion_uses_negative_threshold_not_severe_probation() -> None:
+    policy = CATransitionPolicy(exclusion_negative_rounds=3, severe_suspicious_probation_rounds=1)
+    snapshot = initialized(policy)
+    negative = dict.fromkeys(snapshot.participant_states, EvidenceCategory.NEUTRAL)
+    negative["a"] = EvidenceCategory.NEGATIVE
+    suspicious = evolve(snapshot, policy, negative)
+    assert suspicious.participant_states["a"].unresolved_severe_since_round is None
+    held = evolve(suspicious, policy, dict.fromkeys(negative, EvidenceCategory.NEUTRAL), round_number=1)
+    assert held.participant_states["a"].state is ParticipantState.SUSPICIOUS
+
+
+def test_positive_recovery_can_resolve_severe_provenance_only_when_enabled() -> None:
+    policy = CATransitionPolicy(
+        recovery_enabled=True,
+        recovery_positive_rounds=1,
+        recovery_min_trust=0,
+        trusted_neighbor_min_count=0,
+        trusted_neighbor_min_fraction=0,
+        severe_suspicious_probation_rounds=1,
+    )
+    severe = {"a": EvidenceCategory.SEVERE, "b": EvidenceCategory.NEUTRAL, "c": EvidenceCategory.NEUTRAL}
+    suspicious = evolve(initialized(policy), policy, severe)
+    recovered = evolve(
+        suspicious,
+        policy,
+        {"a": EvidenceCategory.POSITIVE, "b": EvidenceCategory.NEUTRAL, "c": EvidenceCategory.NEUTRAL},
+        round_number=1,
+    )
+    assert recovered.participant_states["a"].state is ParticipantState.OBSERVATION
+    assert recovered.participant_states["a"].unresolved_severe_since_round is None
+
+
+def test_forged_severe_provenance_is_rejected_and_changes_hash() -> None:
+    with pytest.raises(ValueError, match="requires suspicious or excluded"):
+        ParticipantCAState("a", unresolved_severe_since_round=0)
+    with pytest.raises(ValueError, match="backed by transition history"):
+        ParticipantCAState("a", ParticipantState.SUSPICIOUS, unresolved_severe_since_round=0)
+    policy = CATransitionPolicy()
+    ordinary = initialized(
+        policy,
+        {
+            "a": ParticipantCAState("a", ParticipantState.SUSPICIOUS),
+            "b": ParticipantCAState("b"),
+            "c": ParticipantCAState("c"),
+        },
+    )
+    severe = initialized(
+        policy,
+        {
+            "a": ParticipantCAState("a", ParticipantState.SUSPICIOUS, last_transition_round=0, unresolved_severe_since_round=0),
+            "b": ParticipantCAState("b"),
+            "c": ParticipantCAState("c"),
+        },
+    )
+    assert ordinary.snapshot_hash != severe.snapshot_hash
+
+
 def test_severe_is_not_cancelled_by_trusted_neighbors() -> None:
     policy = CATransitionPolicy()
     states = {key: ParticipantCAState(key, ParticipantState.TRUSTED) for key in ("a", "b", "c")}
@@ -108,7 +185,7 @@ def test_neutral_never_increments_positive_history() -> None:
         "b": ParticipantCAState("b", ParticipantState.TRUSTED),
         "c": ParticipantCAState("c"),
     }
-    result = evolve(initialized(policy, states), policy, {key: EvidenceCategory.NEUTRAL for key in states})
+    result = evolve(initialized(policy, states), policy, dict.fromkeys(states, EvidenceCategory.NEUTRAL))
     assert result.participant_states["a"].consecutive_positive_rounds == 0
     assert result.participant_states["a"].state is ParticipantState.OBSERVATION
 
@@ -121,7 +198,7 @@ def test_excluded_recovery_is_stepwise_and_after_cooldown() -> None:
         "c": ParticipantCAState("c", ParticipantState.TRUSTED),
     }
     snapshot = initialized(policy, states)
-    positive = {key: EvidenceCategory.POSITIVE for key in states}
+    positive = dict.fromkeys(states, EvidenceCategory.POSITIVE)
     for round_number in range(2):
         snapshot = evolve(snapshot, policy, positive, round_number=round_number)
         assert snapshot.participant_states["a"].state is ParticipantState.EXCLUDED
@@ -138,7 +215,7 @@ def test_transitions_are_synchronous() -> None:
         "c": ParticipantCAState("c"),
     }
     graph = {"a": {"b"}, "b": {"a", "c"}, "c": {"b"}}
-    result = evolve(initialized(policy, states), policy, {key: EvidenceCategory.POSITIVE for key in states}, graph=graph)
+    result = evolve(initialized(policy, states), policy, dict.fromkeys(states, EvidenceCategory.POSITIVE), graph=graph)
     assert result.participant_states["b"].state is ParticipantState.TRUSTED
     assert result.participant_states["c"].state is ParticipantState.OBSERVATION
 
@@ -171,7 +248,7 @@ def test_nonfinite_trust_fails_closed(bad: float) -> None:
         evolve(
             snapshot,
             CATransitionPolicy(),
-            {key: EvidenceCategory.NEUTRAL for key in snapshot.participant_states},
+            dict.fromkeys(snapshot.participant_states, EvidenceCategory.NEUTRAL),
             {"a": bad, "b": 0.5, "c": 0.5},
         )
 
@@ -179,7 +256,7 @@ def test_nonfinite_trust_fails_closed(bad: float) -> None:
 def test_missing_unknown_and_asymmetric_topology_fail_closed() -> None:
     policy = CATransitionPolicy()
     snapshot = initialized(policy)
-    evidence = {key: EvidenceCategory.NEUTRAL for key in snapshot.participant_states}
+    evidence = dict.fromkeys(snapshot.participant_states, EvidenceCategory.NEUTRAL)
     with pytest.raises(ValueError, match="incomplete"):
         evolve(snapshot, policy, evidence, {"a": 0.5, "b": 0.5})
     with pytest.raises(ValueError, match="unknown"):
@@ -191,8 +268,8 @@ def test_missing_unknown_and_asymmetric_topology_fail_closed() -> None:
 def test_inputs_are_not_mutated_and_experiments_do_not_share_state() -> None:
     policy = CATransitionPolicy()
     graph = topology("a", "b", "c")
-    trusts = {key: 0.5 for key in graph}
-    evidence = {key: EvidenceCategory.NEUTRAL for key in graph}
+    trusts = dict.fromkeys(graph, 0.5)
+    evidence = dict.fromkeys(graph, EvidenceCategory.NEUTRAL)
     before = ({key: set(value) for key, value in graph.items()}, dict(trusts), dict(evidence))
     one = CATransitionEngine.initialize("one", list(graph), policy, graph)
     CATransitionEngine.transition(one, CATransitionInput(0, trusts, evidence, graph), policy)
@@ -212,6 +289,6 @@ def test_hashes_cover_policy_topology_state_and_evidence_and_are_repeatable() ->
     changed_states = dict(base.participant_states)
     changed_states["a"] = ParticipantCAState("a", ParticipantState.SUSPICIOUS)
     assert base.snapshot_hash != initialized(policy, changed_states).snapshot_hash
-    neutral = {key: EvidenceCategory.NEUTRAL for key in base.participant_states}
+    neutral = dict.fromkeys(base.participant_states, EvidenceCategory.NEUTRAL)
     positive = dict(neutral, a=EvidenceCategory.POSITIVE)
     assert evolve(base, policy, neutral).snapshot_hash != evolve(base, policy, positive).snapshot_hash

@@ -28,7 +28,9 @@ configuration fields or making a causal claim.
 The attacked validators follow `observation -> suspicious` after round 0 and
 `suspicious -> excluded` after round 1, then remain excluded through rounds 2-5.
 They are ineligible as validators beginning with round 1 and totally ineligible
-beginning with round 2. Repeatedly evaluated honest validators can become trusted
+beginning with round 2. Round 1 evidence is neutral because of that quarantine;
+the configured one-round probation escalates the unresolved round 0 severe finding
+without fabricating another validator event. Repeatedly evaluated honest validators can become trusted
 after round 2; neutral participants cannot accumulate the positive counter.
 
 ## Windows execution order
@@ -36,9 +38,10 @@ after round 2; neutral participants cannot accumulate the positive counter.
 Run from the repository root in PowerShell, with the project environment installed:
 
 ```powershell
-Remove-Item -Recurse -Force results\mnist-ca-runtime\attacked -ErrorAction SilentlyContinue
+Remove-Item -Force results\mnist-ca-runtime\attacked\validation.json -ErrorAction SilentlyContinue
+Remove-Item -Force results\mnist-ca-runtime\clean\validation.json -ErrorAction SilentlyContinue
+Remove-Item -Force results\mnist-ca-runtime\comparison.json -ErrorAction SilentlyContinue
 uv run python -m p2pfl.examples.mnist.mnist --config configs\smoke\mnist_ca_runtime_attacked.yaml
-Remove-Item -Recurse -Force results\mnist-ca-runtime\clean -ErrorAction SilentlyContinue
 uv run python -m p2pfl.examples.mnist.mnist --config configs\smoke\mnist_ca_runtime_clean.yaml
 uv run python -m brbfl.experiments.compare_ca_runtime --clean results\mnist-ca-runtime\clean\validation.json --attacked results\mnist-ca-runtime\attacked\validation.json --output results\mnist-ca-runtime\comparison.json
 ```

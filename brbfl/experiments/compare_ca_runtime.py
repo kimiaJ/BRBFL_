@@ -59,6 +59,7 @@ def validate_runtime_artifact(artifact: dict[str, Any]) -> None:
             expected = {
                 ("observation", "suspicious", "severe"): "observation_severe",
                 ("suspicious", "excluded", "severe"): "suspicious_repeated_negative",
+                ("suspicious", "excluded", "neutral"): "suspicious_severe_probation_expired",
                 ("observation", "trusted", "positive"): "observation_promoted",
             }.get((record["previous_state"], record["next_state"], record["evidence_category"]))
             if record["previous_state"] == record["next_state"]:

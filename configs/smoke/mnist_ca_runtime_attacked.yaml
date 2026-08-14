@@ -40,7 +40,7 @@ ca:
   minimum_contributors: 1
   minimum_validators: 1
   validator_quorum: 1
-  policy: {promotion_positive_rounds: 3, recovery_positive_rounds: 3, exclusion_negative_rounds: 2, excluded_cooldown_rounds: 3, trusted_neighbor_min_count: 0, trusted_neighbor_min_fraction: 0.0, promotion_min_trust: 0.7, recovery_min_trust: 0.6, recovery_enabled: false}
+  policy: {promotion_positive_rounds: 3, recovery_positive_rounds: 3, exclusion_negative_rounds: 2, severe_suspicious_probation_rounds: 1, excluded_cooldown_rounds: 3, trusted_neighbor_min_count: 0, trusted_neighbor_min_fraction: 0.0, promotion_min_trust: 0.7, recovery_min_trust: 0.6, recovery_enabled: false}
 attack:
   name: byzantine_validator
   adversaries: [3, 4]
