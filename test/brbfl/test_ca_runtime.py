@@ -4,7 +4,7 @@
 
 import pytest
 
-from brbfl.ca import EvidenceCategory, FinalizedTrustEvidenceMapper, ParticipantState
+from brbfl.ca import EvidenceCategory, FinalizedTrustEvidenceMapper, ParticipantCAState, ParticipantState
 from brbfl.ledger.runtime import RuntimeLedgerAdapter, RuntimeLedgerConfig
 
 PARTICIPANTS = ("a", "b")
@@ -93,6 +93,27 @@ def test_disabled_ca_preserves_artifacts_and_does_not_gate_rounds():
     )
     assert value.ca_artifact() is None
     value.open_round(0, "parent")
+
+
+def test_ca_artifact_serializes_generation_history_counters_from_domain_states():
+    value = runtime("ca-artifact-history")
+    initial_snapshot = value.ca_snapshot(0)
+    assert all(isinstance(state, ParticipantCAState) for state in initial_snapshot.participant_states.values())
+
+    initial_states = value.ca_artifact()["generations"]["0"]["participant_states"]
+    assert initial_states["a"]["consecutive_positive"] == 0
+    assert initial_states["b"]["consecutive_negative"] == 0
+
+    complete(value, disagree=("b",))
+    evolved_snapshot = value.ca_snapshot(1)
+    assert evolved_snapshot.participant_states["a"].consecutive_positive_rounds == 1
+    assert evolved_snapshot.participant_states["b"].consecutive_negative_rounds == 1
+
+    evolved_states = value.ca_artifact()["generations"]["1"]["participant_states"]
+    assert evolved_states["a"]["consecutive_positive"] == 1
+    assert evolved_states["a"]["consecutive_negative"] == 0
+    assert evolved_states["b"]["consecutive_positive"] == 0
+    assert evolved_states["b"]["consecutive_negative"] == 1
 
 
 def test_ca_state_strategy_installs_prior_finalized_assignment():

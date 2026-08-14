@@ -431,8 +431,8 @@ class RuntimeLedgerAdapter:
                         "participant_states": {
                             node: {
                                 "state": snapshot.participant_states[node].state.value,
-                                "consecutive_positive": snapshot.participant_states[node].consecutive_positive,
-                                "consecutive_negative": snapshot.participant_states[node].consecutive_negative,
+                                "consecutive_positive": snapshot.participant_states[node].consecutive_positive_rounds,
+                                "consecutive_negative": snapshot.participant_states[node].consecutive_negative_rounds,
                                 "rounds_in_state": snapshot.participant_states[node].rounds_in_state,
                                 "last_transition_round": snapshot.participant_states[node].last_transition_round,
                             }
