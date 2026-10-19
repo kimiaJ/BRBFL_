@@ -16,6 +16,7 @@ from brbfl.ca import (
     CATransitionProvenance,
     FinalizedTrustEvidenceMapper,
 )
+from brbfl.detectors.evidence import DetectorEvidence
 from brbfl.ledger import BlockchainLedger, create_ledger, disabled_ledger_artifact
 from brbfl.selection.roles import (
     CARoleSelectionPolicy,
@@ -52,6 +53,8 @@ class RuntimeLedgerConfig:
     ca_minimum_validators: int = 1
     ca_validator_quorum: int = 1
     ca_bootstrap_rounds: int = 1
+    detector_target_counts: Mapping[str, int] = field(default_factory=dict)
+    detector_capabilities: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 class RuntimeLedgerAdapter:
@@ -101,6 +104,10 @@ class RuntimeLedgerAdapter:
             raise ValueError("CA-state selection requires enabled CA")
         if config.selection_strategy not in ("static", "trust_ranked", "ca_state"):
             raise ValueError(f"unsupported role selection strategy: {config.selection_strategy}")
+        if config.detector_target_counts and config.selection_strategy != "ca_state":
+            raise ValueError("specialized detector selection requires CA-state selection")
+        if set(config.detector_capabilities) - set(self.participants):
+            raise ValueError("detector capabilities reference unknown participants")
         if config.ca_enabled:
             topology = config.ca_topology or {
                 node: tuple(other for other in self.participants if other != node) for node in self.participants
@@ -133,6 +140,9 @@ class RuntimeLedgerAdapter:
             for node in self.participants
         }
         for node in self.participants:
+            specialized = self.config.detector_capabilities.get(node, ())
+            if specialized:
+                capabilities[node] = capabilities[node] | frozenset({"detector", *specialized})
             self._ledger.register_participant(self.experiment_id, node, capabilities[node])
         self._capabilities = capabilities
         self._selector = StaticRoundRoleSelector(self.contributors, self.validators, self.contributors)
@@ -155,6 +165,7 @@ class RuntimeLedgerAdapter:
                     validator_quorum=self.config.ca_validator_quorum,
                     suspicious_contributors=self.config.ca_suspicious_contributors,
                     bootstrap_rounds=self.config.ca_bootstrap_rounds,
+                    detector_target_counts=self.config.detector_target_counts,
                 ),
             )
 
@@ -218,6 +229,19 @@ class RuntimeLedgerAdapter:
             self._invoke(self._ledger.open_round, self.experiment_id, int(round_number), parent_model_hash)
             self._assignments[int(round_number)] = assignment
             self._parents[int(round_number)] = parent_model_hash
+
+    def record_detector_committee(
+        self, round_number: int, capability: str, participant_id: str,
+        source_artifact_hash: str, evidence: tuple[DetectorEvidence, ...],
+    ) -> None:
+        """Commit a committee result through the authoritative ledger boundary."""
+        with self._lock:
+            if self._ledger is None:
+                return
+            self._invoke(
+                self._ledger.commit_detector_committee, self.experiment_id, round_number,
+                capability, participant_id, source_artifact_hash, evidence,
+            )
 
     def role_assignment(self, round_number: int) -> RoundRoleAssignment:
         """Return the immutable authoritative assignment for an opened round."""

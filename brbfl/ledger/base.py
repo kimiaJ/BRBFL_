@@ -9,6 +9,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from brbfl.detectors.evidence import DetectorEvidence
     from brbfl.selection.roles import RoundRoleAssignment
 
 
@@ -24,6 +25,7 @@ class EventType(str, Enum):
     MODEL_INSTALLATION_CONFIRMED = "ModelInstallationConfirmed"
     ROUND_FINALIZED = "RoundFinalized"
     CA_TRANSITION_COMMITTED = "CATransitionCommitted"
+    DETECTOR_COMMITTEE_COMMITTED = "DetectorCommitteeCommitted"
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,12 @@ class LedgerEvent:
 
 class BlockchainLedger(ABC):
     """Semantic contract for memory and future permissioned-chain backends."""
+
+    @abstractmethod
+    def commit_detector_committee(
+        self, experiment_id: str, round_number: int, capability: str, participant_id: str,
+        source_artifact_hash: str, evidence: tuple[DetectorEvidence, ...],
+    ) -> LedgerReceipt: ...
 
     @abstractmethod
     def start_experiment(self, experiment_id: str, required_installers: tuple[str, ...]) -> LedgerReceipt: ...

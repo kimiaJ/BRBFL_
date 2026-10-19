@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from brbfl.canonical import canonical_hash
+from brbfl.detectors.committee import finalize_detector_committee
+from brbfl.detectors.evidence import DetectorEvidence
 from brbfl.ledger.base import BlockchainLedger, EventType, LedgerEvent, LedgerReceipt
 from brbfl.selection.roles import RoundRoleAssignment, validate_capabilities
 
@@ -22,6 +24,7 @@ class _Round:
     aggregate: dict[str, Any] | None = None
     installations: dict[str, str] = field(default_factory=dict)
     finalized: bool = False
+    detector_committees: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -119,6 +122,38 @@ class InMemoryLedger(BlockchainLedger):
             return self._idempotent(EventType.CA_TRANSITION_COMMITTED, experiment_id, canonical, round_number)
         experiment.ca_transitions[round_number] = canonical
         return self._append(EventType.CA_TRANSITION_COMMITTED, experiment_id, canonical, round_number)
+
+    def commit_detector_committee(
+        self, experiment_id: str, round_number: int, capability: str, participant_id: str,
+        source_artifact_hash: str, evidence: tuple[DetectorEvidence, ...],
+    ) -> LedgerReceipt:
+        """Validate committee quorum before admitting immutable update evidence."""
+        record = self._round(experiment_id, round_number)
+        if record.parent_model_hash is None:
+            raise RuntimeError("round is not open")
+        if record.admission is not None:
+            raise RuntimeError("detector evidence must precede admission finalization")
+        candidate = record.candidates.get(participant_id)
+        if candidate is None or candidate["candidate_hash"] != source_artifact_hash:
+            raise ValueError("detector evidence does not match the committed candidate")
+        registered = self._experiment(experiment_id).participants
+        for member in record.assignment.detector_subgroups.get(capability, ()):
+            if not {"detector", capability} <= registered[member]:
+                raise ValueError("committee member lacks registered specialized capability")
+        decision = finalize_detector_committee(record.assignment, capability, participant_id, source_artifact_hash, evidence)
+        payload = {
+            "decision": decision.artifact(),
+            "evidence": [row.artifact() for row in sorted(evidence, key=lambda row: row.detector_id)],
+        }
+        key = (capability, participant_id)
+        existing = record.detector_committees.get(key)
+        if existing is not None:
+            if existing != payload:
+                raise RuntimeError("conflicting detector committee commitment")
+            return self._idempotent(EventType.DETECTOR_COMMITTEE_COMMITTED, experiment_id, payload, round_number, participant_id)
+        receipt = self._append(EventType.DETECTOR_COMMITTEE_COMMITTED, experiment_id, payload, round_number, participant_id)
+        record.detector_committees[key] = payload
+        return receipt
 
     def start_experiment(self, experiment_id: str, required_installers: tuple[str, ...]) -> LedgerReceipt:
         payload = {"required_installers": sorted(set(required_installers))}
@@ -370,6 +405,8 @@ class InMemoryLedger(BlockchainLedger):
                 "aggregate": record.aggregate,
                 "installations": record.installations,
                 "finalized": record.finalized,
+                **({"detector_committees": [deepcopy(value) for _, value in sorted(record.detector_committees.items())]}
+                   if record.detector_committees else {}),
             }
         )
 
@@ -436,6 +473,12 @@ class InMemoryLedger(BlockchainLedger):
                     "aggregate": experiment.rounds[number].aggregate,
                     "installation_confirmations": dict(sorted(experiment.rounds[number].installations.items())),
                     "finalized": experiment.rounds[number].finalized,
+                    **(
+                        {"detector_committees": [
+                            deepcopy(value) for _, value in sorted(experiment.rounds[number].detector_committees.items())
+                        ]}
+                        if experiment.rounds[number].detector_committees else {}
+                    ),
                 }
                 for number in rounds
             },

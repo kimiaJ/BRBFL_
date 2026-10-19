@@ -255,8 +255,16 @@ class CARoleSelectionPolicy:
     validator_quorum: int = 1
     suspicious_contributors: bool = True
     bootstrap_rounds: int = 1
+    detector_target_counts: Mapping[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        groups = dict(sorted(self.detector_target_counts.items()))
+        if any(
+            not isinstance(name, str) or not name or isinstance(count, bool) or not isinstance(count, int) or count < 1
+            for name, count in groups.items()
+        ):
+            raise ValueError("detector targets require named capabilities and positive integer counts")
+        object.__setattr__(self, "detector_target_counts", MappingProxyType(groups))
         counts = (
             self.contributor_target_count,
             self.validator_target_count,
@@ -287,6 +295,7 @@ class CARoleSelectionPolicy:
                 "bootstrap_rounds": self.bootstrap_rounds,
                 "state_priority": [state.value for state in ParticipantState],
                 "tie_breaker": "participant_id",
+                **({"detector_target_counts": dict(self.detector_target_counts)} if self.detector_target_counts else {}),
             },
         )
 
@@ -300,7 +309,21 @@ class CAStateRoleSelector(RoundRoleSelector):
 
     def select_roles(self, context: SelectionContext) -> RoundRoleAssignment:
         if context.round_number < self.policy.bootstrap_rounds:
-            return self._bootstrap.select_roles(context)
+            base = self._bootstrap.select_roles(context)
+            if not self.policy.detector_target_counts:
+                return base
+            groups = {}
+            for capability, count in self.policy.detector_target_counts.items():
+                eligible = sorted(
+                    node for node, capabilities in context.participant_capabilities.items()
+                    if DETECTOR in capabilities and capability in capabilities
+                )
+                if len(eligible) < count:
+                    raise RuntimeError("insufficient specialized detector candidates during bootstrap")
+                groups[capability] = tuple(eligible[:count])
+            assignment = replace(base, detector_subgroups=groups, policy_hash=self.policy.policy_hash)
+            validate_capabilities(assignment, context.participant_capabilities)
+            return assignment
         snapshot = context.ca_snapshot
         if snapshot is None:
             raise RuntimeError("verified prior-round CA snapshot is unavailable")
@@ -343,6 +366,15 @@ class CAStateRoleSelector(RoundRoleSelector):
             raise RuntimeError("insufficient CA-eligible validators")
         selected_contributors = contributors[: self.policy.contributor_target_count]
         selected_validators = validators[: self.policy.validator_target_count]
+        groups = {}
+        for capability, count in self.policy.detector_target_counts.items():
+            eligible = tuple(
+                node for node in ranked(capability, (ParticipantState.TRUSTED, ParticipantState.OBSERVATION))
+                if DETECTOR in context.participant_capabilities[node]
+            )
+            if len(eligible) < count:
+                raise RuntimeError(f"insufficient CA-eligible specialized detectors: {capability}")
+            groups[capability] = eligible[:count]
         # The static assignment is only a structural template after bootstrap;
         # CA replaces its configured contributor and validator identities.
         template_context = replace(
@@ -365,6 +397,7 @@ class CAStateRoleSelector(RoundRoleSelector):
             source_trust_round=context.source_trust_round,
             source_trust_hash=context.source_trust_hash,
             policy_hash=self.policy.policy_hash,
+            **({"detector_subgroups": groups} if self.policy.detector_target_counts else {}),
         )
         validate_capabilities(assignment, context.participant_capabilities)
         return assignment
