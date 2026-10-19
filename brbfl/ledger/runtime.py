@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from brbfl.ca import (
@@ -16,7 +16,10 @@ from brbfl.ca import (
     CATransitionProvenance,
     FinalizedTrustEvidenceMapper,
 )
+from brbfl.canonical import canonical_hash
 from brbfl.detectors.evidence import DetectorEvidence
+from brbfl.detectors.reference import median_reference
+from brbfl.detectors.sign_flipping import SignFlippingDetector
 from brbfl.ledger import BlockchainLedger, create_ledger, disabled_ledger_artifact
 from brbfl.selection.roles import (
     CARoleSelectionPolicy,
@@ -77,6 +80,10 @@ class RuntimeLedgerAdapter:
         self.contributors = tuple(sorted(contributors))
         self.validators = tuple(sorted(validators))
         self._lock = threading.RLock()
+        self._detector_condition = threading.Condition(self._lock)
+        self._detector_models: dict[int, dict[str, tuple]] = {}
+        self._detector_results: dict[int, dict[str, bool]] = {}
+        self._detector_errors: dict[int, Exception] = {}
         self._ledger = create_ledger(
             enabled=config.enabled,
             backend=config.backend,
@@ -231,6 +238,77 @@ class RuntimeLedgerAdapter:
             self._invoke(self._ledger.open_round, self.experiment_id, int(round_number), parent_model_hash)
             self._assignments[int(round_number)] = assignment
             self._parents[int(round_number)] = parent_model_hash
+
+    def detect_model_submission(
+        self, round_number: int, participant_id: str, parameters: list, *, publisher_id: str, timeout: float = 60,
+    ) -> bool:
+        """Coordinate a complete observable candidate set before model admission."""
+        from brbfl.validation.byzantine_gate import canonical_parameters, parameter_hash
+
+        capability = "model_update_detector"
+        if capability not in self.config.detector_target_counts:
+            return True
+        with self._detector_condition:
+            if round_number in self._detector_errors:
+                raise RuntimeError("model-update detection previously failed") from self._detector_errors[round_number]
+            assignment = self.role_assignment(round_number)
+            if participant_id not in assignment.selected_contributors:
+                raise ValueError("detector submission is not a selected contributor")
+            if publisher_id == participant_id:
+                snapshot = canonical_parameters(parameters)
+                committed = self._candidate_hashes.get(round_number, {}).get(participant_id)
+                if committed != parameter_hash(snapshot):
+                    raise ValueError("detector submission differs from the committed candidate")
+                models = self._detector_models.setdefault(round_number, {})
+                existing = models.get(participant_id)
+                if existing is not None and parameter_hash(existing) != committed:
+                    raise RuntimeError("conflicting detector submission")
+                models[participant_id] = snapshot
+                if set(models) == set(assignment.selected_contributors) and round_number not in self._detector_results:
+                    try:
+                        reference, reference_provenance = median_reference(models)
+                        results = {}
+                        for candidate, values in sorted(models.items()):
+                            source_hash = self._candidate_hashes[round_number][candidate]
+                            evidence = tuple(
+                                replace(
+                                    SignFlippingDetector(member).evaluate(
+                                        experiment_id=self.experiment_id, round_number=round_number,
+                                        detector_assignment_hash=assignment.assignment_hash,
+                                        evaluated_participant_id=candidate, candidate_update=values, reference_update=reference,
+                                    ),
+                                    source_artifact_hash=source_hash,
+                                )
+                                for member in assignment.detector_subgroups[capability]
+                            )
+                            evidence = tuple(replace(row, measurement_hash=canonical_hash(
+                                "CommitteeReferenceMeasurement/v1",
+                                {"measurement_hash": row.measurement_hash, "reference_provenance_hash": reference_provenance},
+                            )) for row in evidence)
+                            self.record_detector_committee(round_number, capability, candidate, source_hash, evidence)
+                            assert self._ledger is not None
+                            committed_rows = self._ledger.get_round_record(self.experiment_id, round_number)["detector_committees"]
+                            committed_decision = next(
+                                row["decision"] for row in committed_rows
+                                if row["decision"]["participant_id"] == candidate and row["decision"]["capability"] == capability
+                            )
+                            results[candidate] = committed_decision["category"] not in ("severe", "negative")
+                        self._detector_results[round_number] = results
+                    except Exception as exc:
+                        self._detector_errors[round_number] = exc
+                    finally:
+                        self._detector_condition.notify_all()
+            ready = self._detector_condition.wait_for(
+                lambda: round_number in self._detector_results or round_number in self._detector_errors, timeout=timeout,
+            )
+            if not ready:
+                error = RuntimeError("timed out waiting for complete detector submissions")
+                self._detector_errors[round_number] = error
+                self._detector_condition.notify_all()
+                raise error
+            if round_number in self._detector_errors:
+                raise RuntimeError("model-update detection failed") from self._detector_errors[round_number]
+            return self._detector_results[round_number][participant_id]
 
     def record_detector_committee(
         self, round_number: int, capability: str, participant_id: str,

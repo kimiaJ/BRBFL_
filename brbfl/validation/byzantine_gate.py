@@ -233,6 +233,14 @@ class ValidatorSubgroupGate:
                     votes,
                     publisher_id=current_node,
                 )
+                detector_admitted = runtime_ledger.detect_model_submission(
+                    round_number, candidate, parameters, publisher_id=current_node,
+                )
+                if not detector_admitted:
+                    admitted = False
+                    self._candidates[key]["admitted"] = False
+                    self._candidates[key]["admission_reason"] = "specialized_detector_rejected"
+                    self._candidates[key]["rejection_receipt"] = {"blocked_before_aggregator_add_model": True}
             return admitted
 
     def observe_round_result(self, round_id: Any, parameters: list[Any], contributors: list[str], *, canonical_hash_source: str) -> None:

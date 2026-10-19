@@ -451,6 +451,13 @@ def mnist(
                 ca_minimum_validators=config.ca.minimum_validators,
                 ca_validator_quorum=config.ca.validator_quorum,
                 ca_bootstrap_rounds=config.ca.bootstrap_rounds,
+                detector_target_counts=(
+                    {"model_update_detector": config.model_detector.committee_size} if config.model_detector.enabled else {}
+                ),
+                detector_capabilities=(
+                    {node: ("model_update_detector",) for node in config.model_detector.eligible_participants}
+                    if config.model_detector.enabled else {}
+                ),
             ),
             experiment_id=f"mnist:{config.seed}:ca-runtime" if config.ca.enabled else f"mnist:{config.seed}:{attack_name}",
             participants=tuple(node.addr for node in nodes),

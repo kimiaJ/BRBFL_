@@ -116,6 +116,15 @@ class CAConfig:
 
 
 @dataclass(frozen=True)
+class ModelDetectorConfig:
+    """Optional observable-model committee policy for the local runtime."""
+
+    enabled: bool = False
+    committee_size: int = 3
+    eligible_participants: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     """Complete runnable experiment settings."""
 
@@ -140,6 +149,7 @@ class ExperimentConfig:
     participant_selection: ParticipantSelectionConfig = field(default_factory=ParticipantSelectionConfig)
     trust: TrustConfig = field(default_factory=TrustConfig)
     ca: CAConfig = field(default_factory=CAConfig)
+    model_detector: ModelDetectorConfig = field(default_factory=ModelDetectorConfig)
 
 
 def _topology(value: str | TopologyType) -> TopologyType:
@@ -158,6 +168,12 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     selection_raw = raw.get("selection", raw.get("participant_selection", {})) or {}
     trust_raw = raw.get("trust", {}) or {}
     ca_raw = raw.get("ca", {}) or {}
+    detector_raw = raw.get("model_detector", {}) or {}
+    model_detector = ModelDetectorConfig(
+        enabled=bool(detector_raw.get("enabled", False)),
+        committee_size=detector_raw.get("committee_size", 3),
+        eligible_participants=tuple(detector_raw.get("eligible_participants", ()) or ()),
+    )
 
     dataset = DatasetConfig(
         name=dataset_raw.get("name", DatasetConfig.name),
@@ -227,6 +243,16 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     ):
         raise ValueError("ca_state selection requires ledger, enforcement-capable trust, and CA")
 
+    if model_detector.enabled:
+        if participant_selection.mode != "ca_state" or not validation.enabled or len(validation.contributors) < 3:
+            raise ValueError("model detector requires CA-state selection, validation, and at least three contributors")
+        if (
+            type(model_detector.committee_size) is not int or model_detector.committee_size < 1
+            or model_detector.committee_size > len(set(model_detector.eligible_participants))
+            or len(set(model_detector.eligible_participants)) != len(model_detector.eligible_participants)
+        ):
+            raise ValueError("invalid model detector committee size or eligible participants")
+
     return ExperimentConfig(
         nodes=raw.get("nodes", ExperimentConfig.nodes),
         rounds=raw.get("rounds", ExperimentConfig.rounds),
@@ -249,4 +275,5 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         participant_selection=participant_selection,
         trust=trust,
         ca=ca,
+        model_detector=model_detector,
     )
