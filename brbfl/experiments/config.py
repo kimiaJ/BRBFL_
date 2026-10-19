@@ -10,6 +10,8 @@ from typing import Any
 
 import yaml
 
+from brbfl.ca import CATransitionPolicy
+
 
 class TopologyType(Enum):
     """Supported topology names without importing the runnable P2PFL stack."""
@@ -101,6 +103,19 @@ class TrustConfig:
 
 
 @dataclass(frozen=True)
+class CAConfig:
+    """CA finalization and role-gating settings for the real runtime."""
+
+    enabled: bool = False
+    policy: CATransitionPolicy = field(default_factory=CATransitionPolicy)
+    suspicious_contributors: bool = True
+    minimum_contributors: int = 1
+    minimum_validators: int = 1
+    validator_quorum: int = 1
+    bootstrap_rounds: int = 1
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     """Complete runnable experiment settings."""
 
@@ -124,6 +139,7 @@ class ExperimentConfig:
     blockchain: BlockchainConfig = field(default_factory=BlockchainConfig)
     participant_selection: ParticipantSelectionConfig = field(default_factory=ParticipantSelectionConfig)
     trust: TrustConfig = field(default_factory=TrustConfig)
+    ca: CAConfig = field(default_factory=CAConfig)
 
 
 def _topology(value: str | TopologyType) -> TopologyType:
@@ -141,6 +157,7 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     blockchain_raw = raw.get("blockchain", {}) or {}
     selection_raw = raw.get("selection", raw.get("participant_selection", {})) or {}
     trust_raw = raw.get("trust", {}) or {}
+    ca_raw = raw.get("ca", {}) or {}
 
     dataset = DatasetConfig(
         name=dataset_raw.get("name", DatasetConfig.name),
@@ -179,7 +196,7 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         insufficient_eligible_policy=str(validator_selection.get("insufficient_eligible_policy", "fail_closed")),
         tie_breaker=str(validator_selection.get("tie_breaker", "node_id")),
     )
-    if participant_selection.mode not in {"static", "trust_ranked"}:
+    if participant_selection.mode not in {"static", "trust_ranked", "ca_state"}:
         raise ValueError(f"unsupported participant selection mode: {participant_selection.mode}")
     trust = TrustConfig(
         enabled=bool(trust_raw.get("enabled", False)),
@@ -189,11 +206,26 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         update_source=str(trust_raw.get("update_source", "validator_reference_agreement")),
         observation_only=bool(trust_raw.get("observation_only", True)),
     )
+    policy_names = CATransitionPolicy.__dataclass_fields__
+    policy_raw = ca_raw.get("policy", {}) or {}
+    ca = CAConfig(
+        enabled=bool(ca_raw.get("enabled", False)),
+        policy=CATransitionPolicy(**{key: value for key, value in policy_raw.items() if key in policy_names}),
+        suspicious_contributors=bool(ca_raw.get("suspicious_contributors", True)),
+        minimum_contributors=int(ca_raw.get("minimum_contributors", 1)),
+        minimum_validators=int(ca_raw.get("minimum_validators", 1)),
+        validator_quorum=int(ca_raw.get("validator_quorum", validation.quorum or 1)),
+        bootstrap_rounds=int(ca_raw.get("bootstrap_rounds", 1)),
+    )
     if participant_selection.mode == "trust_ranked":
         if not trust.enabled or trust.observation_only:
             raise ValueError("trust_ranked selection requires enabled trust with observation_only=false")
         if participant_selection.insufficient_eligible_policy != "fail_closed" or participant_selection.tie_breaker != "node_id":
             raise ValueError("unsupported trust-ranked selection policy")
+    if participant_selection.mode == "ca_state" and (
+        not ca.enabled or not trust.enabled or trust.observation_only or not blockchain.enabled
+    ):
+        raise ValueError("ca_state selection requires ledger, enforcement-capable trust, and CA")
 
     return ExperimentConfig(
         nodes=raw.get("nodes", ExperimentConfig.nodes),
@@ -216,4 +248,5 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         blockchain=blockchain,
         participant_selection=participant_selection,
         trust=trust,
+        ca=ca,
     )

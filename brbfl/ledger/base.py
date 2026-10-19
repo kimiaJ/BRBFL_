@@ -23,6 +23,7 @@ class EventType(str, Enum):
     AGGREGATE_COMMITTED = "AggregateCommitted"
     MODEL_INSTALLATION_CONFIRMED = "ModelInstallationConfirmed"
     ROUND_FINALIZED = "RoundFinalized"
+    CA_TRANSITION_COMMITTED = "CATransitionCommitted"
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,9 @@ class BlockchainLedger(ABC):
 
     @abstractmethod
     def verify_round(self, experiment_id: str, round_number: int) -> bool: ...
+
+    @abstractmethod
+    def commit_ca_transition(self, experiment_id: str, round_number: int, payload: dict[str, Any]) -> LedgerReceipt: ...
 
     @abstractmethod
     def close(self) -> None: ...

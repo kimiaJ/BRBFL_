@@ -9,9 +9,39 @@ import math
 from pathlib import Path
 from typing import Any
 
+_NONFINITE_FLOAT_TAG = "__nonfinite_float__"
+
+
+def canonicalize_json(value: Any) -> Any:
+    """
+    Return a deterministic JSON-safe copy of a comparison value.
+
+    Comparison artifacts can contain unbounded policy values even though JSON has
+    no representation for IEEE-754 infinities or NaN.  Keep that evidence
+    explicit rather than weakening strict serialization or dropping the field.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        if math.isnan(value):
+            name = "nan"
+        elif value > 0:
+            name = "positive_infinity"
+        else:
+            name = "negative_infinity"
+        return {_NONFINITE_FLOAT_TAG: name}
+    if isinstance(value, dict):
+        return {key: canonicalize_json(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [canonicalize_json(item) for item in value]
+    return value
+
 
 def _digest(domain: str, value: object) -> str:
-    raw = json.dumps({"domain": domain, "value": value}, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    raw = json.dumps(
+        canonicalize_json({"domain": domain, "value": value}),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -163,6 +193,7 @@ def compare_evidence(clean: dict[str, Any], attacked: dict[str, Any]) -> dict[st
         "verification_reason": "verified",
         "causal_status": "proven_byzantine_vote_inversion_lowered_attacker_trust",
     }
+    result = canonicalize_json(result)
     result["comparison_sha256"] = _digest("TrustComparison/v1", result)
     return result
 
@@ -179,7 +210,10 @@ def main() -> None:
             raise FileNotFoundError(path)
     result = compare_evidence(json.loads(args.clean.read_text()), json.loads(args.attacked.read_text()))
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    args.output.write_text(
+        json.dumps(canonicalize_json(result), indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
 
 
 if __name__ == "__main__":

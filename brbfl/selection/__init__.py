@@ -1,6 +1,8 @@
 """Round-scoped role selection."""
 
 from brbfl.selection.roles import (
+    CARoleSelectionPolicy,
+    CAStateRoleSelector,
     Role,
     RoundRoleAssignment,
     RoundRoleSelector,
@@ -10,6 +12,8 @@ from brbfl.selection.roles import (
 )
 
 __all__ = [
+    "CARoleSelectionPolicy",
+    "CAStateRoleSelector",
     "Role",
     "RoundRoleAssignment",
     "RoundRoleSelector",

@@ -29,6 +29,7 @@ class _Experiment:
     required_installers: tuple[str, ...]
     participants: dict[str, frozenset[str]] = field(default_factory=dict)
     rounds: dict[int, _Round] = field(default_factory=dict)
+    ca_transitions: dict[int, dict[str, Any]] = field(default_factory=dict)
 
 
 class InMemoryLedger(BlockchainLedger):
@@ -103,6 +104,21 @@ class InMemoryLedger(BlockchainLedger):
         if mutable and record.finalized:
             raise RuntimeError(f"finalized round cannot be mutated: round={round_number}")
         return record
+
+    def commit_ca_transition(self, experiment_id: str, round_number: int, payload: dict[str, Any]) -> LedgerReceipt:
+        """Commit an idempotent CA result only after its source round is final."""
+        experiment = self._experiment(experiment_id)
+        record = self._round(experiment_id, round_number, mutable=False)
+        if not record.finalized or not self.verify_round(experiment_id, round_number):
+            raise RuntimeError("CA transition requires a verified finalized source round")
+        canonical = deepcopy(payload)
+        existing = experiment.ca_transitions.get(round_number)
+        if existing is not None:
+            if existing != canonical:
+                raise RuntimeError(f"conflicting CA transition commitment: round={round_number}")
+            return self._idempotent(EventType.CA_TRANSITION_COMMITTED, experiment_id, canonical, round_number)
+        experiment.ca_transitions[round_number] = canonical
+        return self._append(EventType.CA_TRANSITION_COMMITTED, experiment_id, canonical, round_number)
 
     def start_experiment(self, experiment_id: str, required_installers: tuple[str, ...]) -> LedgerReceipt:
         payload = {"required_installers": sorted(set(required_installers))}

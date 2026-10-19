@@ -444,8 +444,15 @@ def mnist(
                 validator_target_count=config.participant_selection.target_count,
                 validator_minimum_trust=config.participant_selection.minimum_trust,
                 validator_bootstrap_rounds=config.participant_selection.bootstrap_rounds,
+                ca_enabled=config.ca.enabled,
+                ca_policy=config.ca.policy,
+                ca_suspicious_contributors=config.ca.suspicious_contributors,
+                ca_minimum_contributors=config.ca.minimum_contributors,
+                ca_minimum_validators=config.ca.minimum_validators,
+                ca_validator_quorum=config.ca.validator_quorum,
+                ca_bootstrap_rounds=config.ca.bootstrap_rounds,
             ),
-            experiment_id=f"mnist:{config.seed}:{attack_name}",
+            experiment_id=f"mnist:{config.seed}:ca-runtime" if config.ca.enabled else f"mnist:{config.seed}:{attack_name}",
             participants=tuple(node.addr for node in nodes),
             contributors=config.validation.contributors,
             validators=config.validation.validators,
@@ -786,6 +793,8 @@ def mnist(
                 "rounds": round_evidence,
                 "ledger": runtime_ledger.validation_artifact(),
                 **({"trust": runtime_ledger.trust_artifact()} if runtime_ledger.trust_artifact() is not None else {}),
+                **({"ca": runtime_ledger.ca_artifact()} if runtime_ledger.ca_artifact() is not None else {}),
+                "execution_mode": "real_p2pfl_runtime",
                 "final_model_sha256": (
                     training_audits["node-0"].evidence_for_round(r - 1)["installed_global_model_sha256"]
                     if collusion_validation

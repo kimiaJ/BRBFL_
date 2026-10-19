@@ -1,11 +1,18 @@
 # ruff: noqa: D103
 """Focused regression tests for dynamic trust-ranked comparison evidence."""
 
+import json
+import math
 from copy import deepcopy
 
 import pytest
 
-from brbfl.experiments.compare_byzantine_validator_trust import _digest, compare_evidence, controlled_fields
+from brbfl.experiments.compare_byzantine_validator_trust import (
+    _digest,
+    canonicalize_json,
+    compare_evidence,
+    controlled_fields,
+)
 from brbfl.experiments.compare_dynamic_trust_selection import compare_dynamic
 
 NODES = [f"node-{index}" for index in range(5)]
@@ -211,3 +218,54 @@ def test_input_dictionary_order_does_not_change_hash():
     reordered_attacked = dict(reversed(list(attacked.items())))
     assert compare_dynamic(reordered_clean, reordered_attacked)["comparison_sha256"] == expected
     assert compare_dynamic(clean, attacked)["comparison_sha256"] == expected
+
+
+def test_nonfinite_policy_bound_is_preserved_as_strict_json_and_hashes_deterministically():
+    clean, attacked = artifacts()
+    for artifact in (clean, attacked):
+        artifact["configuration"]["validation"]["max_l2_norm"] = math.inf
+    original_clean, original_attacked = deepcopy(clean), deepcopy(attacked)
+
+    first = compare_dynamic(clean, attacked)
+    second = compare_dynamic(dict(reversed(list(clean.items()))), dict(reversed(list(attacked.items()))))
+
+    assert first["controlled_fields"]["validation"]["max_l2_norm"] == {
+        "__nonfinite_float__": "positive_infinity"
+    }
+    assert json.loads(json.dumps(first, allow_nan=False)) == first
+    assert first["comparison_sha256"] == second["comparison_sha256"]
+    assert clean == original_clean
+    assert attacked == original_attacked
+
+
+def test_canonicalization_distinguishes_nonfinite_values_and_preserves_finite_numbers_without_mutation():
+    source = {
+        "positive": math.inf,
+        "negative": -math.inf,
+        "not_a_number": math.nan,
+        "finite_float": 1.25,
+        "finite_int": 7,
+        "nested": [True, None, "text"],
+    }
+
+    encoded = canonicalize_json(source)
+
+    assert encoded["positive"] == {"__nonfinite_float__": "positive_infinity"}
+    assert encoded["negative"] == {"__nonfinite_float__": "negative_infinity"}
+    assert encoded["not_a_number"] == {"__nonfinite_float__": "nan"}
+    assert encoded["finite_float"] == 1.25
+    assert isinstance(encoded["finite_float"], float)
+    assert encoded["finite_int"] == 7
+    assert isinstance(encoded["finite_int"], int)
+    assert math.isinf(source["positive"]) and source["positive"] > 0
+    assert math.isinf(source["negative"]) and source["negative"] < 0
+    assert math.isnan(source["not_a_number"])
+    assert encoded is not source and encoded["nested"] is not source["nested"]
+
+
+def test_digest_canonicalizes_equivalent_dictionary_order_without_mutating_input():
+    first = {"z": math.inf, "a": {"number": 2.5}}
+    second = {"a": {"number": 2.5}, "z": math.inf}
+
+    assert _digest("ordering/v1", first) == _digest("ordering/v1", second)
+    assert math.isinf(first["z"]) and math.isinf(second["z"])
