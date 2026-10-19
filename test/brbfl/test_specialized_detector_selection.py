@@ -4,13 +4,52 @@ from dataclasses import replace
 
 import pytest
 
-from brbfl.ca import ParticipantState
+from brbfl.ca import (
+    CATransitionEngine,
+    CATransitionInput,
+    CATransitionPolicy,
+    EvidenceCategory,
+    ParticipantCAState,
+    ParticipantState,
+)
 from brbfl.ledger.runtime import RuntimeLedgerAdapter, RuntimeLedgerConfig
 from brbfl.selection import CARoleSelectionPolicy, CAStateRoleSelector, SelectionContext, StaticRoundRoleSelector
-from test.brbfl.test_ca_role_selection import context, snapshot
 
 CAPABILITY = "model_update_detector"
 CAPS = {node: frozenset({"contributor", "validator", "detector", CAPABILITY}) for node in "abcde"}
+
+
+def snapshot(states):
+    """Build a finalized CA snapshot without importing another test module."""
+    ids = tuple(states)
+    topology = {node: tuple(other for other in ids if other != node) for node in ids}
+    policy = CATransitionPolicy()
+    initial = CATransitionEngine.initialize(
+        "exp",
+        ids,
+        policy,
+        topology,
+        {node: ParticipantCAState(node, state) for node, state in states.items()},
+    )
+    return CATransitionEngine.transition(
+        initial,
+        CATransitionInput(0, dict.fromkeys(ids, 0.5), dict.fromkeys(ids, EvidenceCategory.NEUTRAL), topology),
+        policy,
+    )
+
+
+def context(value, scores=None, capabilities=CAPS):
+    """Bind selection to the verified prior-round state and trust provenance."""
+    return SelectionContext(
+        "exp",
+        1,
+        capabilities,
+        value.snapshot_hash,
+        scores if scores is not None else dict.fromkeys(capabilities, 0.5),
+        value,
+        0,
+        "trust-0",
+    )
 
 
 def selector():
