@@ -5,9 +5,11 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+from brbfl.ca import EvidenceCategory, FinalizedTrustEvidenceMapper, ParticipantState
 from brbfl.detectors import SignFlippingDetector
 from brbfl.experiments.sign_flipping_evidence import canonical_parameter_hash
 from brbfl.ledger.runtime import RuntimeLedgerAdapter, RuntimeLedgerConfig
+from brbfl.trust.model import TrustUpdateEvidence
 
 CAPABILITY = "model_update_detector"
 
@@ -78,3 +80,36 @@ def test_invalid_committee_cannot_append_an_event():
     with pytest.raises(ValueError, match="context"):
         runtime.record_detector_committee(0, CAPABILITY, "a", source, (replace(evidence[0], round_number=1), evidence[1]))
     assert len(runtime.ledger.events) == count
+
+
+def test_finalized_detector_evidence_updates_contributor_trust_and_ca_once():
+    """Committed numerical evidence affects trust and the next verified CA state."""
+    runtime, source, evidence = fixture()
+    runtime.record_detector_committee(0, CAPABILITY, "a", source, evidence)
+    runtime.record_candidate(
+        0,
+        "a",
+        "parent",
+        source,
+        [{"validator_node_id": node, "reported_decision": True, "reference_decision": True} for node in ("b", "c")],
+    )
+    assert not runtime._trust.snapshots
+    runtime.finalize_admission(0, {"a": True})
+    for participant in ("a", "b", "c"):
+        runtime.confirm_installation(0, participant, "aggregate")
+    runtime.finalize_round(0)
+    trust = runtime._trust.snapshots[0]
+    assert trust.post_round["a"].beta == 2
+    assert trust.post_round["a"].detector_negative_count == 1
+    assert trust.post_round["a"].processed_vote_count == 0
+    assert trust.detector_updates[0]["decision_hash"]
+    mixed = replace(trust, updates=(*trust.updates, TrustUpdateEvidence(0, "a", "a", True, True, True, "a" * 64)))
+    assert FinalizedTrustEvidenceMapper().categories(("a", "b", "c"), mixed)["a"] == EvidenceCategory.SEVERE
+    ca = runtime.ca_snapshot(1)
+    assert ca.participant_states["a"].state == ParticipantState.SUSPICIOUS
+    assert next(row for row in ca.transition_records if row.participant_id == "a").evidence_category == EvidenceCategory.SEVERE
+    runtime.finalize_round(0)
+    assert runtime._trust.snapshots[0] is trust
+    assert runtime._trust.states["a"].detector_negative_count == 1
+    runtime.open_round(1, "aggregate")
+    assert "a" not in runtime.role_assignment(1).detector_subgroups[CAPABILITY]

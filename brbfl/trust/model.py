@@ -17,6 +17,8 @@ class ValidatorTrustState:
     agreement_count: int = 0
     disagreement_count: int = 0
     last_finalized_round: int | None = None
+    detector_positive_count: int = 0
+    detector_negative_count: int = 0
 
     @property
     def score(self) -> float:
@@ -31,6 +33,9 @@ class ValidatorTrustState:
             "disagreement_count": self.disagreement_count,
             "processed_vote_count": self.processed_vote_count,
             "last_finalized_round": self.last_finalized_round,
+            **({"detector_positive_count": self.detector_positive_count,
+                "detector_negative_count": self.detector_negative_count}
+               if self.detector_positive_count or self.detector_negative_count else {}),
         }
 
 
@@ -68,7 +73,11 @@ class RoundTrustSnapshot:
     updates: tuple[TrustUpdateEvidence, ...]
     post_round: Mapping[str, ValidatorTrustState]
     snapshot_sha256: str
+    detector_updates: tuple[Mapping[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "pre_round", MappingProxyType(dict(self.pre_round)))
         object.__setattr__(self, "post_round", MappingProxyType(dict(self.post_round)))
+        object.__setattr__(self, "detector_updates", tuple(
+            MappingProxyType({**row, "evidence_hashes": tuple(row["evidence_hashes"])}) for row in self.detector_updates
+        ))

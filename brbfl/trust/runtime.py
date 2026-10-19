@@ -11,6 +11,7 @@ from dataclasses import replace
 from types import MappingProxyType
 from typing import Any
 
+from brbfl.canonical import canonical_hash
 from brbfl.trust.model import RoundTrustSnapshot, TrustUpdateEvidence, ValidatorTrustState
 
 
@@ -50,6 +51,7 @@ class TrustRuntime:
         eligible_validators: Iterable[str],
         candidates: Iterable[str],
         decisions: Iterable[Mapping[str, Any]],
+        detector_decisions: Iterable[Mapping[str, Any]] = (),
     ) -> RoundTrustSnapshot:
         if isinstance(round_id, bool) or not isinstance(round_id, int) or round_id < 0:
             raise ValueError("round_id must be a non-negative canonical integer")
@@ -103,7 +105,37 @@ class TrustRuntime:
                 last_finalized_round=round_id,
             )
         payload = self._snapshot_payload(round_id, pre, ordered, post)
-        snapshot = RoundTrustSnapshot(self.experiment_id, round_id, pre, ordered, post, _hash("RoundTrustSnapshot/v1", payload))
+        detector_updates = []
+        seen = set()
+        for raw in sorted(detector_decisions, key=lambda row: (row["capability"], row["participant_id"])):
+            row = dict(raw)
+            digest = row.pop("decision_hash", None)
+            if digest != canonical_hash("DetectorCommitteeDecision/v1", row):
+                raise RuntimeError("invalid detector decision hash")
+            participant = row.get("participant_id")
+            category = row.get("category")
+            key = (row.get("capability"), participant)
+            if participant not in post or participant not in candidate_ids or key in seen:
+                raise RuntimeError("unknown or duplicate detector trust subject")
+            if category not in ("positive", "negative", "severe", "neutral"):
+                raise RuntimeError("invalid detector evidence category")
+            seen.add(key)
+            state = post[participant]
+            positive = category == "positive"
+            negative = category in ("negative", "severe")
+            post[participant] = replace(
+                state, alpha=state.alpha + int(positive), beta=state.beta + int(negative),
+                detector_positive_count=state.detector_positive_count + int(positive),
+                detector_negative_count=state.detector_negative_count + int(negative),
+                last_finalized_round=round_id,
+            )
+            detector_updates.append({**row, "decision_hash": digest})
+        if detector_updates:
+            payload["detector_updates"] = detector_updates
+            payload["post_round"] = {node: post[node].artifact() for node in sorted(post)}
+        snapshot = RoundTrustSnapshot(
+            self.experiment_id, round_id, pre, ordered, post, _hash("RoundTrustSnapshot/v1", payload), tuple(detector_updates),
+        )
         self._states = post
         self._snapshots[round_id] = snapshot
         return snapshot
@@ -126,6 +158,7 @@ class TrustRuntime:
                 "updates": [update.artifact() for update in snapshot.updates],
                 "post_round": {node: snapshot.post_round[node].artifact() for node in sorted(snapshot.post_round)},
                 "snapshot_sha256": snapshot.snapshot_sha256,
+                **({"detector_updates": [dict(row) for row in snapshot.detector_updates]} if snapshot.detector_updates else {}),
             }
         return {
             "enabled": True,

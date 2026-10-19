@@ -38,7 +38,7 @@ class FinalizedTrustEvidenceMapper:
         for update in trust_snapshot.updates:
             if update.validator_id in updates:
                 updates[update.validator_id].append(update.agreed)
-        return {
+        categories = {
             participant: (
                 EvidenceCategory.NEUTRAL
                 if not values
@@ -48,6 +48,15 @@ class FinalizedTrustEvidenceMapper:
             )
             for participant, values in sorted(updates.items())
         }
+        priority = {EvidenceCategory.NEUTRAL: 0, EvidenceCategory.POSITIVE: 1,
+                    EvidenceCategory.NEGATIVE: 2, EvidenceCategory.SEVERE: 3}
+        for row in trust_snapshot.detector_updates:
+            participant = row["participant_id"]
+            if participant in categories:
+                category = EvidenceCategory(row["category"])
+                if priority[category] > priority[categories[participant]]:
+                    categories[participant] = category
+        return categories
 
 
 @dataclass(frozen=True, slots=True)

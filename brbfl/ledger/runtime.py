@@ -91,6 +91,8 @@ class RuntimeLedgerAdapter:
         self._ca_provenance: dict[int, CATransitionProvenance] = {}
         trust_population = config.validator_eligible_participants or self.validators
         self.validator_eligible_participants = tuple(sorted(trust_population))
+        if config.detector_target_counts:
+            trust_population = tuple(sorted(set(trust_population) | set(self.contributors)))
         if config.selection_strategy == "trust_ranked" and (not config.trust_enabled or config.trust_observation_only):
             raise ValueError("trust-ranked selection requires enabled, enforcement-capable trust")
         self._trust = (
@@ -369,6 +371,7 @@ class RuntimeLedgerAdapter:
                     record["assignment"]["selected_validators"],
                     record["candidates"],
                     decisions,
+                    detector_decisions=[row["decision"] for row in record.get("detector_committees", ())],
                 )
             if self.config.ca_enabled and round_number not in self._ca_provenance:
                 self._finalize_ca(round_number)
