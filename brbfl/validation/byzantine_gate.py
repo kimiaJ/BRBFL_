@@ -398,14 +398,29 @@ def install_validator_gate(gate: ValidatorSubgroupGate) -> None:
         _round_barriers.clear()
 
 
+def _selected_round_contributors(round_id: int) -> tuple[str, ...]:
+    """Use frozen round membership rather than bootstrap eligibility."""
+    from brbfl.ledger.runtime import get_runtime_ledger
+
+    runtime = get_runtime_ledger()
+    if runtime is not None and runtime.ledger is not None:
+        return tuple(sorted(runtime.role_assignment(int(round_id)).selected_contributors))
+    if _gate_policy is None:
+        raise RuntimeError("validator admission policy is not installed")
+    return tuple(sorted(_gate_policy.contributors))
+
+
 def publish_admission_decision(round_id: int, candidate: str, admitted: bool) -> None:
     """Publish the final candidate decision to the process-wide canonical ledger."""
     with _registry_condition:
+        selected = _selected_round_contributors(round_id)
+        if candidate not in selected:
+            raise RuntimeError(f"admission from unselected contributor: round={round_id}, candidate={candidate}")
         decisions = _round_decisions.setdefault(int(round_id), {})
         previous = decisions.setdefault(candidate, bool(admitted))
         if previous != bool(admitted):
             raise RuntimeError(f"conflicting admission decision: round={round_id}, candidate={candidate}")
-        if _gate_policy is not None and set(decisions) == set(_gate_policy.contributors):
+        if set(decisions) == set(selected):
             from brbfl.ledger.runtime import get_runtime_ledger
 
             runtime_ledger = get_runtime_ledger()
@@ -420,7 +435,7 @@ def wait_for_admitted_contributors(round_id: int, timeout: float) -> tuple[str, 
     with _registry_condition:
         if _gate_policy is None:
             raise RuntimeError("validator admission policy is not installed")
-        configured = tuple(sorted(_gate_policy.contributors))
+        configured = _selected_round_contributors(round_id)
         while set(_round_decisions.get(int(round_id), {})) != set(configured):
             remaining = deadline - time.monotonic()
             if remaining <= 0:

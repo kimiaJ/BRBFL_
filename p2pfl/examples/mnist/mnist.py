@@ -28,7 +28,7 @@ import os
 import re
 import time
 import uuid
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -456,7 +456,8 @@ def mnist(
                 ),
                 detector_capabilities=(
                     {node: ("model_update_detector",) for node in config.model_detector.eligible_participants}
-                    if config.model_detector.enabled else {}
+                    if config.model_detector.enabled
+                    else {}
                 ),
             ),
             experiment_id=f"mnist:{config.seed}:ca-runtime" if config.ca.enabled else f"mnist:{config.seed}:{attack_name}",
@@ -576,10 +577,11 @@ def mnist(
                 actual_training = sorted(node_id for node_id, row in role_rows.items() if row["actually_trained"])
                 submitted = sorted(node_id for node_id, row in role_rows.items() if row["submitted_candidate"])
                 configured = sorted(config.validation.contributors)
-                if actual_training != configured or submitted != configured:
+                selected = list(next(iter(selected_sets)))
+                if actual_training != selected or submitted != selected:
                     raise RuntimeError(
                         f"contributor role invariant failed: round={round_number}, trained={actual_training}, "
-                        f"submitted={submitted}, configured={configured}"
+                        f"submitted={submitted}, selected={selected}, configured={configured}"
                     )
                 evidence["trainer_roles"] = {
                     "all_network_nodes": sorted(participating),
@@ -598,7 +600,7 @@ def mnist(
                     for row in all_validator_evidence
                     if row["round"] == round_number and row["current_node"] == row["candidate_node_id"]
                 ]
-                if len(owner_rows) != len(configured):
+                if sorted(row["candidate_node_id"] for row in owner_rows) != selected:
                     raise RuntimeError(f"missing canonical candidate-owner evidence: round={round_number}")
                 result_hashes = {row.get("installed_global_model_sha256") for row in owner_rows}
                 contributor_sets = {tuple(row.get("round_aggregation_contributors", ())) for row in owner_rows}
@@ -699,6 +701,10 @@ def mnist(
                     "aggregator": config.aggregator,
                     "topology": config.topology.value,
                     "batch_size": config.batch_size,
+                    "model_detector": asdict(config.model_detector),
+                    "ca": asdict(config.ca),
+                    "trust": asdict(config.trust),
+                    "selection": asdict(config.participant_selection),
                     "eligible_trainers": list(config.eligible_trainers) if config.eligible_trainers is not None else None,
                     "dataset": {
                         "name": config.dataset.name,

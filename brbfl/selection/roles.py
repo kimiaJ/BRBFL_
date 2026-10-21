@@ -315,7 +315,8 @@ class CAStateRoleSelector(RoundRoleSelector):
             groups = {}
             for capability, count in self.policy.detector_target_counts.items():
                 eligible = sorted(
-                    node for node, capabilities in context.participant_capabilities.items()
+                    node
+                    for node, capabilities in context.participant_capabilities.items()
                     if DETECTOR in capabilities and capability in capabilities
                 )
                 if len(eligible) < count:
@@ -342,15 +343,15 @@ class CAStateRoleSelector(RoundRoleSelector):
             raise RuntimeError("finalized source trust provenance is unavailable or stale")
         scores = dict(context.trust_scores)
         if set(scores) != participants or any(
-            not isinstance(score, int | float) or isinstance(score, bool) or not math.isfinite(score)
-            for score in scores.values()
+            not isinstance(score, int | float) or isinstance(score, bool) or not math.isfinite(score) for score in scores.values()
         ):
             raise RuntimeError("complete finite finalized trust scores are required")
 
         def ranked(role: str, permitted: tuple[ParticipantState, ...]) -> tuple[str, ...]:
             priority = {state: index for index, state in enumerate(permitted)}
             eligible = (
-                node for node, value in snapshot.participant_states.items()
+                node
+                for node, value in snapshot.participant_states.items()
                 if value.state in priority and role in context.participant_capabilities[node]
             )
             return tuple(sorted(eligible, key=lambda node: (priority[snapshot.participant_states[node].state], -scores[node], node)))
@@ -360,7 +361,14 @@ class CAStateRoleSelector(RoundRoleSelector):
             contributor_states += (ParticipantState.SUSPICIOUS,)
         contributors = ranked(CONTRIBUTOR, contributor_states)
         validators = ranked(VALIDATOR, (ParticipantState.TRUSTED, ParticipantState.OBSERVATION))
-        if len(contributors) < self.policy.contributor_target_count:
+        # Detector rounds may shrink after exclusion, but must retain enough
+        # published models for the unchanged median-reference policy.
+        required = (
+            max(min(3, self.policy.contributor_target_count), self.policy.minimum_contributors)
+            if self.policy.detector_target_counts
+            else self.policy.contributor_target_count
+        )
+        if len(contributors) < required:
             raise RuntimeError("insufficient CA-eligible contributors")
         if len(validators) < self.policy.validator_target_count:
             raise RuntimeError("insufficient CA-eligible validators")
@@ -369,7 +377,8 @@ class CAStateRoleSelector(RoundRoleSelector):
         groups = {}
         for capability, count in self.policy.detector_target_counts.items():
             eligible = tuple(
-                node for node in ranked(capability, (ParticipantState.TRUSTED, ParticipantState.OBSERVATION))
+                node
+                for node in ranked(capability, (ParticipantState.TRUSTED, ParticipantState.OBSERVATION))
                 if DETECTOR in context.participant_capabilities[node]
             )
             if len(eligible) < count:
@@ -385,10 +394,15 @@ class CAStateRoleSelector(RoundRoleSelector):
             },
         )
         base = self._bootstrap.select_roles(template_context)
-        if not set(base.aggregation_eligible_nodes) <= set(selected_contributors):
+        if not self.policy.detector_target_counts and not set(base.aggregation_eligible_nodes) <= set(selected_contributors):
             raise RuntimeError("configured aggregator membership is not CA contributor eligible")
         assignment = replace(
             base,
+            aggregation_eligible_nodes=(
+                tuple(node for node in base.aggregation_eligible_nodes if node in selected_contributors)
+                if self.policy.detector_target_counts
+                else base.aggregation_eligible_nodes
+            ),
             selected_contributors=selected_contributors,
             selected_validators=selected_validators,
             selection_source="ca_state",

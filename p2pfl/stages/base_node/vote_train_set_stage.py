@@ -61,8 +61,20 @@ class VoteTrainSetStage(Stage):
 
             # Aggregate votes
             protocol_selected = VoteTrainSetStage.__aggregate_votes(trainset_size, state, communication_protocol)
+            from brbfl.ledger.runtime import get_runtime_ledger
+            from brbfl.validation import parameter_hash
+
+            runtime = get_runtime_ledger()
+            selected_candidates = protocol_selected
+            if runtime is not None and runtime.ledger is not None:
+                learner = kwargs.get("learner")
+                if learner is None:
+                    raise RuntimeError("runtime role selection requires the current learner model")
+                runtime.open_round(int(state.round), parameter_hash(learner.get_model().get_parameters()))
+                selected_candidates = list(runtime.role_assignment(int(state.round)).selected_contributors)
+
             state.train_set = VoteTrainSetStage.validate_train_set(
-                protocol_selected,
+                selected_candidates,
                 state,
                 communication_protocol,
             )
