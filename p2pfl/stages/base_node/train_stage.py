@@ -69,6 +69,14 @@ class TrainStage(Stage):
                     f"eligible={sorted(state.eligible_trainers)}"
                 )
 
+            from brbfl.validation import get_validator_gate
+
+            gate = get_validator_gate(state.addr)
+            if gate is not None:
+                # Exact-hash receipts require a fixed reduction over original
+                # inputs. Intermediate gossip averages change reduction trees.
+                aggregator.partial_aggregation = False
+
             # Set Models To Aggregate
             aggregator.set_nodes_to_aggregate(state.train_set, round_id=state.round)
 
@@ -128,9 +136,6 @@ class TrainStage(Stage):
             aggregation_observer = getattr(attack, "observe_aggregation", None)
             if aggregation_observer is not None:
                 aggregation_observer(learner.get_model().get_parameters())
-            from brbfl.validation import get_validator_gate
-
-            gate = get_validator_gate(state.addr)
             admitted = gate is None or gate.submit_and_decide(
                 state.round,
                 state.addr,

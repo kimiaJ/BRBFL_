@@ -55,6 +55,14 @@ class FedAvg(Aggregator):
         if len(models) == 0:
             raise NoModelsToAggregateError(f"({self.addr}) Trying to aggregate models when there is no models")
 
+        # A single input is already averaged. Reweighting it can change low
+        # floating-point bits, including when a complete aggregate is relayed.
+        if len(models) == 1:
+            return models[0]
+
+        # Reception order must not change the exact global-model digest.
+        models = sorted(models, key=lambda model: tuple(sorted(model.get_contributors())))
+
         # Total Samples
         total_samples = sum([m.get_num_samples() for m in models])
 

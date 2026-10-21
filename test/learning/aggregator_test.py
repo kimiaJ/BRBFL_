@@ -240,3 +240,50 @@ def test_next_round_restores_configured_contributor_after_prior_rejection():
     aggregator.set_nodes_to_aggregate(configured, round_id=1)
 
     assert aggregator.get_expected_aggregation_models() == set(configured)
+
+
+@pytest.mark.parametrize("order", [(0, 1, 2), (2, 1, 0), (1, 2, 0)])
+def test_fedavg_exact_hash_independent_of_arrival_order(order):
+    """Cancellation-prone float32 inputs have one canonical reduction order."""
+    from brbfl.validation.byzantine_gate import parameter_hash
+
+    models = [
+        P2PFLModelMock(None, params=[np.array([value], dtype=np.float32)], num_samples=1, contributors=[node])
+        for node, value in (("a", 1e8), ("b", -1e8), ("c", 1.0))
+    ]
+    aggregator = FedAvg(disable_partial_aggregation=True)
+    aggregator.set_addr("test")
+    expected = aggregator.aggregate(models)
+    actual = aggregator.aggregate([models[index] for index in order])
+    assert parameter_hash(actual.get_parameters()) == parameter_hash(expected.get_parameters())
+    assert actual.get_contributors() == ["a", "b", "c"]
+
+
+def test_fedavg_single_input_preserves_exact_parameters():
+    """A fully aggregated relay cannot introduce another multiply/divide."""
+    model = P2PFLModelMock(None, params=[np.array([0.1], dtype=np.float32)], num_samples=13, contributors=["a", "b"])
+    aggregator = FedAvg()
+    aggregator.set_addr("test")
+    assert aggregator.aggregate([model]) is model
+
+
+def test_individual_gossip_produces_identical_trainer_aggregates():
+    """Different gossip arrival schedules preserve identical global digests."""
+    from brbfl.validation.byzantine_gate import parameter_hash
+
+    models = [
+        P2PFLModelMock(None, params=[np.array([value], dtype=np.float32)], num_samples=1, contributors=[node])
+        for node, value in (("a", 1e8), ("b", -1e8), ("c", 1.0))
+    ]
+    results = []
+    for order in ((0, 1, 2), (2, 0, 1), (1, 2, 0)):
+        aggregator = FedAvg(disable_partial_aggregation=True)
+        aggregator.set_addr("test")
+        aggregator.set_nodes_to_aggregate(["a", "b", "c"], round_id=0)
+        aggregator.finalize_admitted_contributors(0, ["a", "b", "c"], ["a", "b", "c"])
+        for index in order:
+            aggregator.add_model(models[index])
+        assert len(aggregator.get_model([]).get_contributors()) == 1
+        result = aggregator.wait_and_get_aggregation(timeout=0)
+        results.append(parameter_hash(result.get_parameters()))
+    assert len(set(results)) == 1
