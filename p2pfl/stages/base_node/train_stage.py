@@ -197,21 +197,17 @@ class TrainStage(Stage):
             learner.set_model(agg_model)
             installed_hash = parameter_hash(learner.get_model().get_parameters())
             if gate is not None:
+                from brbfl.validation.byzantine_gate import canonical_aggregation_inputs
+
+                contributors = sorted(learner.get_model().get_contributors())
+                input_hashes = canonical_aggregation_inputs(int(state.round), contributors)
                 gate.observe_round_result(
                     state.round,
                     learner.get_model().get_parameters(),
-                    learner.get_model().get_contributors(),
+                    contributors,
                     canonical_hash_source=f"{state.addr} installed aggregate after wait_and_get_aggregation",
+                    aggregation_input_hashes=input_hashes,
                 )
-                rows = [row for row in gate.evidence() if row["round"] == int(state.round)]
-                admitted_rows = sorted((row for row in rows if row["admitted"]), key=lambda row: row["candidate_node_id"])
-                contributors = sorted(learner.get_model().get_contributors())
-                input_hashes = {row["candidate_node_id"]: row["aggregation_input_sha256"] for row in admitted_rows}
-                if contributors != sorted(input_hashes):
-                    raise RuntimeError(
-                        "aggregate contributor set disagrees with admission decisions: "
-                        f"round={state.round}, node={state.addr}, contributors={contributors}, admitted={sorted(input_hashes)}"
-                    )
                 learner.get_model().additional_info["canonical_round_result"] = {
                     "round": int(state.round),
                     # Every independently aggregating trainer must emit the

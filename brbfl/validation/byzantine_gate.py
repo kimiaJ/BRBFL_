@@ -234,7 +234,10 @@ class ValidatorSubgroupGate:
                     publisher_id=current_node,
                 )
                 detector_admitted = runtime_ledger.detect_model_submission(
-                    round_number, candidate, parameters, publisher_id=current_node,
+                    round_number,
+                    candidate,
+                    parameters,
+                    publisher_id=current_node,
                 )
                 if not detector_admitted:
                     admitted = False
@@ -243,7 +246,15 @@ class ValidatorSubgroupGate:
                     self._candidates[key]["rejection_receipt"] = {"blocked_before_aggregator_add_model": True}
             return admitted
 
-    def observe_round_result(self, round_id: Any, parameters: list[Any], contributors: list[str], *, canonical_hash_source: str) -> None:
+    def observe_round_result(
+        self,
+        round_id: Any,
+        parameters: list[Any],
+        contributors: list[str],
+        *,
+        canonical_hash_source: str,
+        aggregation_input_hashes: dict[str, str] | None = None,
+    ) -> None:
         """Attach installed-model and exact aggregation lineage to every row in a round."""
         round_number = self._round(round_id)
         installed_hash = parameter_hash(parameters)
@@ -253,6 +264,8 @@ class ValidatorSubgroupGate:
             for (candidate_round, candidate), row in self._candidates.items()
             if candidate_round == round_number and row["reached_aggregator_add_model"]
         }
+        if aggregation_input_hashes is not None:
+            inputs = dict(aggregation_input_hashes)
         for (candidate_round, _candidate), row in self._candidates.items():
             if candidate_round == round_number:
                 row["round_aggregation_contributors"] = contributor_set
@@ -415,6 +428,37 @@ def wait_for_admitted_contributors(round_id: int, timeout: float) -> tuple[str, 
                 raise TimeoutError(f"admission decisions timed out: round={round_id}, missing={missing}")
             _registry_condition.wait(remaining)
         return tuple(candidate for candidate in configured if _round_decisions[int(round_id)][candidate])
+
+
+def canonical_aggregation_inputs(round_id: int, contributors: list[str]) -> dict[str, str]:
+    """
+    Resolve aggregate lineage from verified input evidence at each owner.
+
+    Gossip can deliver a multi-contributor aggregate without delivering its
+    individual inputs to the receiving gate. Never infer local observations
+    from that aggregate or from admission alone.
+    """
+    with _registry_lock:
+        decisions = _round_decisions.get(int(round_id), {})
+        expected = sorted(candidate for candidate, admitted in decisions.items() if admitted)
+        if sorted(contributors) != expected:
+            raise RuntimeError(
+                f"aggregate contributor set disagrees with admission decisions: round={round_id}, "
+                f"contributors={sorted(contributors)}, admitted={expected}"
+            )
+        inputs = {}
+        for candidate in expected:
+            owner = _gates.get(candidate)
+            row = None if owner is None else owner._candidates.get((int(round_id), candidate))
+            if (
+                row is None
+                or not row["admitted"]
+                or not row["reached_aggregator_add_model"]
+                or row["aggregation_input_sha256"] != row["submitted_model_sha256"]
+            ):
+                raise RuntimeError(f"missing verified owner aggregation input: round={round_id}, candidate={candidate}")
+            inputs[candidate] = row["aggregation_input_sha256"]
+        return inputs
 
 
 def wait_at_round_barrier(round_id: int, node_id: str, timeout: float) -> None:
