@@ -376,6 +376,7 @@ def mnist(
                 partitions[i] = prepare_dataset(partitions[i], attack_obj)
                 if attack_name == "sign_flipping":
                     attack_obj = AuditedModelUpdateAttack(attack_obj, list(original_model.model.state_dict()))
+                    attack_obj.active_rounds = attack_params.get("active_rounds")
                     model_update_audits[f"node-{i}"] = attack_obj
 
             if free_rider_validation:
@@ -447,6 +448,7 @@ def mnist(
                 contributor_minimum_count=config.participant_selection.minimum_contributors,
                 ca_enabled=config.ca.enabled,
                 ca_policy=config.ca.policy,
+                recovery_probes_enabled=config.ca.recovery_probes_enabled,
                 ca_suspicious_contributors=config.ca.suspicious_contributors,
                 ca_minimum_contributors=config.ca.minimum_contributors,
                 ca_minimum_validators=config.ca.minimum_validators,
