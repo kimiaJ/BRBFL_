@@ -444,6 +444,7 @@ def mnist(
                 validator_target_count=config.participant_selection.target_count,
                 validator_minimum_trust=config.participant_selection.minimum_trust,
                 validator_bootstrap_rounds=config.participant_selection.bootstrap_rounds,
+                contributor_minimum_count=config.participant_selection.minimum_contributors,
                 ca_enabled=config.ca.enabled,
                 ca_policy=config.ca.policy,
                 ca_suspicious_contributors=config.ca.suspicious_contributors,
@@ -455,7 +456,7 @@ def mnist(
                     {"model_update_detector": config.model_detector.committee_size} if config.model_detector.enabled else {}
                 ),
                 detector_capabilities=(
-                    {node: ("model_update_detector",) for node in config.model_detector.eligible_participants}
+                    dict.fromkeys(config.model_detector.eligible_participants, ("model_update_detector",))
                     if config.model_detector.enabled
                     else {}
                 ),

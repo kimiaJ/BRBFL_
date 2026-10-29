@@ -8,6 +8,7 @@ from brbfl.selection.roles import (
     RoundRoleSelector,
     SelectionContext,
     StaticRoundRoleSelector,
+    TrustRankedContributorSelector,
     TrustRankedValidatorSelector,
 )
 
@@ -20,4 +21,5 @@ __all__ = [
     "SelectionContext",
     "StaticRoundRoleSelector",
     "TrustRankedValidatorSelector",
+    "TrustRankedContributorSelector",
 ]

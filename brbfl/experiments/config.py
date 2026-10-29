@@ -75,6 +75,7 @@ class ParticipantSelectionConfig:
     target_count: int = 0
     eligible_participants: tuple[str, ...] = ()
     minimum_trust: float = 0.5
+    minimum_contributors: int = 3
     insufficient_eligible_policy: str = "fail_closed"
     tie_breaker: str = "node_id"
 
@@ -209,10 +210,11 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         target_count=int(validator_selection.get("target_count", selection_raw.get("target_count", 0))),
         eligible_participants=tuple(validator_selection.get("eligible_participants", selection_raw.get("eligible_participants", ())) or ()),
         minimum_trust=float(validator_selection.get("minimum_trust", selection_raw.get("minimum_trust", .5))),
+        minimum_contributors=int(selection_raw.get("minimum_contributors", 3)),
         insufficient_eligible_policy=str(validator_selection.get("insufficient_eligible_policy", "fail_closed")),
         tie_breaker=str(validator_selection.get("tie_breaker", "node_id")),
     )
-    if participant_selection.mode not in {"static", "trust_ranked", "ca_state"}:
+    if participant_selection.mode not in {"static", "trust_ranked", "ca_state", "trust_contributors", "ca_contributors"}:
         raise ValueError(f"unsupported participant selection mode: {participant_selection.mode}")
     trust = TrustConfig(
         enabled=bool(trust_raw.get("enabled", False)),
@@ -233,19 +235,19 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         validator_quorum=int(ca_raw.get("validator_quorum", validation.quorum or 1)),
         bootstrap_rounds=int(ca_raw.get("bootstrap_rounds", 1)),
     )
-    if participant_selection.mode == "trust_ranked":
+    if participant_selection.mode in {"trust_ranked", "trust_contributors"}:
         if not trust.enabled or trust.observation_only:
             raise ValueError("trust_ranked selection requires enabled trust with observation_only=false")
         if participant_selection.insufficient_eligible_policy != "fail_closed" or participant_selection.tie_breaker != "node_id":
             raise ValueError("unsupported trust-ranked selection policy")
-    if participant_selection.mode == "ca_state" and (
+    if participant_selection.mode in {"ca_state", "ca_contributors"} and (
         not ca.enabled or not trust.enabled or trust.observation_only or not blockchain.enabled
     ):
         raise ValueError("ca_state selection requires ledger, enforcement-capable trust, and CA")
 
     if model_detector.enabled:
-        if participant_selection.mode != "ca_state" or not validation.enabled or len(validation.contributors) < 3:
-            raise ValueError("model detector requires CA-state selection, validation, and at least three contributors")
+        if not validation.enabled or not blockchain.enabled or not trust.enabled or len(validation.contributors) < 3:
+            raise ValueError("model detector requires ledger, trust, validation, and at least three contributors")
         if (
             type(model_detector.committee_size) is not int or model_detector.committee_size < 1
             or model_detector.committee_size > len(set(model_detector.eligible_participants))
