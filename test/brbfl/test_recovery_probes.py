@@ -19,7 +19,7 @@ from brbfl.validation.byzantine_gate import (
 
 
 @pytest.mark.parametrize('behavior', ['recover', 'reattack', 'attack', 'missing'])
-def test_probe_recovery_lifecycle(behavior):
+def test_probe_recovery_lifecycle(behavior, monkeypatch):
     """Only fresh positive probes allow reentry, and only in a later round."""
     nodes = tuple('abcdvw')
     trainers, validators = nodes[:4], nodes[4:]
@@ -85,7 +85,46 @@ def test_probe_recovery_lifecycle(behavior):
                         runtime.ledger.commit_recovery_probe(runtime.experiment_id, number, 'b', parent,
                                                              stale[0].source_artifact_hash, tuple(stale))
                 probe = [np.array([1., 2.]) * (-3 if behavior == 'attack' else 1)]
-                receipt = runtime.submit_recovery_probe(number, 'b', parent, probe)
+                if behavior in ('recover', 'reattack'):
+                    from types import SimpleNamespace
+
+                    from brbfl.ca.probe_workflow import recovery_probe_barrier
+                    from brbfl.validation.byzantine_gate import parameter_hash
+
+                    class Model:
+                        def __init__(self, values):
+                            self.values = values
+
+                        def get_parameters(self):
+                            return self.values
+
+                    class Learner:
+                        def __init__(self):
+                            self.model = Model([np.array([.5, 1.])])
+
+                        def get_model(self):
+                            return self.model
+
+                        def set_model(self, value):
+                            self.model = value
+
+                        def fit(self):
+                            self.model.values = [np.array([1., 2.])]
+
+                    learner = Learner()
+                    # Fixture ledger parents are textual placeholders; use the
+                    # same declared parent for this workflow-boundary check.
+                    monkeypatch.setattr('brbfl.ca.probe_workflow.parameter_hash',
+                                        lambda params, parent=parent:
+                                        parent if np.array_equal(params[0], [.5, 1.]) else parameter_hash(params))
+                    state = SimpleNamespace(addr='b', round=number, trainer_role_evidence={number: {}})
+                    recovery_probe_barrier(state, learner, 1)
+                    assert np.array_equal(learner.get_model().get_parameters()[0], [.5, 1.])
+                    assert state.trainer_role_evidence[number]['recovery_probe']['trained']
+                    assert state.trainer_role_evidence[number]['recovery_probe']['submitted']
+                    receipt = runtime.ledger.get_round_record(runtime.experiment_id, number)['recovery_probes']['b']
+                else:
+                    receipt = runtime.submit_recovery_probe(number, 'b', parent, probe)
                 assert receipt['decision']['category'] == ('severe' if behavior == 'attack' else 'positive')
                 count = len(runtime.ledger.events)
                 assert runtime.submit_recovery_probe(number, 'b', parent, probe) == receipt

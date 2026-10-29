@@ -114,6 +114,7 @@ class CAConfig:
     minimum_validators: int = 1
     validator_quorum: int = 1
     bootstrap_rounds: int = 1
+    recovery_probes_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -234,6 +235,7 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         minimum_validators=int(ca_raw.get("minimum_validators", 1)),
         validator_quorum=int(ca_raw.get("validator_quorum", validation.quorum or 1)),
         bootstrap_rounds=int(ca_raw.get("bootstrap_rounds", 1)),
+        recovery_probes_enabled=bool(ca_raw.get("recovery_probes_enabled", False)),
     )
     if participant_selection.mode in {"trust_ranked", "trust_contributors"}:
         if not trust.enabled or trust.observation_only:
@@ -244,6 +246,22 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         not ca.enabled or not trust.enabled or trust.observation_only or not blockchain.enabled
     ):
         raise ValueError("ca_state selection requires ledger, enforcement-capable trust, and CA")
+
+    if "active_rounds" in attack.parameters:
+        schedule = attack.parameters["active_rounds"]
+        if (attack.name != "sign_flipping" or not isinstance(schedule, list)
+                or any(type(r) is not int or r < 0 or r >= int(raw.get("rounds", 15)) for r in schedule)
+                or len(schedule) != len(set(schedule))):
+            raise ValueError("active_rounds must contain unique zero-based sign-flipping round indices")
+
+    if ca.recovery_probes_enabled and raw.get("protocol", "grpc") != "memory":
+        raise ValueError("recovery probe workflow currently requires memory transport")
+    if ca.recovery_probes_enabled and (
+        not ca.enabled or not ca.policy.recovery_enabled or not ca.suspicious_contributors
+        or participant_selection.mode != "ca_contributors" or not model_detector.enabled
+        or attack.name not in {"none", "sign_flipping"}
+    ):
+        raise ValueError("unsupported recovery probe workflow configuration")
 
     if model_detector.enabled:
         if not validation.enabled or not blockchain.enabled or not trust.enabled or len(validation.contributors) < 3:

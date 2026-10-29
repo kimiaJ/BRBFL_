@@ -91,6 +91,8 @@ class RuntimeLedgerAdapter:
         self.validators = tuple(sorted(validators))
         self._lock = threading.RLock()
         self._detector_condition = threading.Condition(self._lock)
+        self._probe_completed: dict[int, set[str]] = {}
+        self._probe_errors: dict[int, Exception] = {}
         self._detector_models: dict[int, dict[str, tuple]] = {}
         self._detector_results: dict[int, dict[str, bool]] = {}
         self._detector_errors: dict[int, Exception] = {}
@@ -339,6 +341,36 @@ class RuntimeLedgerAdapter:
                 raise RuntimeError("model-update detection failed") from self._detector_errors[round_number]
             return self._detector_results[round_number][participant_id]
 
+    def complete_recovery_probe(self, round_number: int, participant_id: str) -> None:
+        """Release the workflow barrier only after a committed assessment."""
+        with self._detector_condition:
+            record = self.ledger.get_round_record(self.experiment_id, round_number)
+            if participant_id not in record.get("recovery_probes", {}):
+                raise RuntimeError("probe completion has no committed assessment")
+            if round_number in self._probe_errors:
+                raise RuntimeError("probe phase already failed") from self._probe_errors[round_number]
+            self._probe_completed.setdefault(round_number, set()).add(participant_id)
+            self._detector_condition.notify_all()
+
+    def fail_recovery_probes(self, round_number: int, error: Exception) -> None:
+        """Wake every waiting participant with the same failed phase."""
+        with self._detector_condition:
+            self._probe_errors.setdefault(round_number, error)
+            self._detector_condition.notify_all()
+
+    def wait_for_recovery_probes(self, round_number: int, timeout: float) -> None:
+        """Bound the wait; timeout cannot permit a late probe or aggregation."""
+        with self._detector_condition:
+            expected = set(self.recovery_probe_subjects(round_number))
+            ready = self._detector_condition.wait_for(
+                lambda: expected <= self._probe_completed.get(round_number, set()) or round_number in self._probe_errors,
+                timeout=timeout,
+            )
+            if not ready:
+                self.fail_recovery_probes(round_number, TimeoutError("recovery probe phase timed out"))
+            if round_number in self._probe_errors:
+                raise RuntimeError("recovery probe phase failed") from self._probe_errors[round_number]
+
     def recovery_probe_subjects(self, round_number: int) -> tuple[str, ...]:
         """Schedule at most one eligible excluded trainer from prior finalized state."""
         if not self.config.recovery_probes_enabled:
@@ -359,6 +391,8 @@ class RuntimeLedgerAdapter:
         from brbfl.validation.byzantine_gate import canonical_parameters, parameter_hash
 
         with self._lock:
+            if round_number in self._probe_errors:
+                raise RuntimeError("recovery probe phase failed") from self._probe_errors[round_number]
             if participant_id not in self.recovery_probe_subjects(round_number):
                 raise ValueError("participant is not scheduled for a recovery probe")
             if self._ledger is None:

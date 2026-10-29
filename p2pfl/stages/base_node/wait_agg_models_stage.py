@@ -47,9 +47,12 @@ class WaitAggregatedModelsStage(Stage):
         # Admission completion is the earliest generic readiness boundary.  In
         # particular, do not start the installation timeout for a future round
         # while contributors are still deciding the current aggregation set.
+        from brbfl.attacks.registry import get_attack
+        from brbfl.ca.probe_workflow import recovery_probe_barrier
         from brbfl.validation import get_validator_gate
         from brbfl.validation.byzantine_gate import wait_for_admitted_contributors
 
+        recovery_probe_barrier(state, kwargs.get("learner"), Settings.training.AGGREGATION_TIMEOUT, get_attack(state.addr))
         if get_validator_gate(state.addr) is not None:
             state.expected_aggregation_models[round_number] = wait_for_admitted_contributors(
                 round_number, Settings.training.AGGREGATION_TIMEOUT

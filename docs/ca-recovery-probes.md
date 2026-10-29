@@ -3,10 +3,10 @@
 ## Implemented scope
 
 This change implements a process-local runtime API and ledger/trust integration.
-It does not yet schedule or train probes in P2PFL's MNIST workflow, expose a YAML
-switch, or produce new MNIST results. Tests exercise real detector, gate, ledger,
-trust and CA code with small numeric models. The next integration step is a
-workflow barrier that completes scheduled probes before round finalization.
+The MNIST integration and YAML switch are now described in
+[ca-recovery-workflow.md](ca-recovery-workflow.md). Tests exercise real detector,
+gate, ledger, trust and CA code with small numeric models; they do not constitute
+new MNIST results. The workflow barrier completes probes before aggregate publication.
 
 `RuntimeLedgerConfig.recovery_probes_enabled` defaults to false. Enabling it
 requires CA contributor selection with fixed sensitive roles, enabled detector,
@@ -50,12 +50,10 @@ The tests also check stale parent, unauthorized subject, premature/late probe,
 replayed committee evidence, conflicting/duplicate submission, immutable candidate
 and admission membership, and unchanged aggregate eligibility during probe rounds.
 
-## Remaining workflow work
+## Workflow and remaining evaluation
 
-The training workflow must provide a bounded probe-training phase after ordinary
-admission and before installation finalizes the round, with timeout/missing-probe
-semantics and separate actual-training/probe counters. Probe data must come from
-the participant's local data and current model. No clean hidden model, attacker
-identity, or forged favorable evidence may be used. Transient and intermittent
-attack schedules and paired recovery-enabled/disabled MNIST configs follow that
-integration. Do not enable this API by editing YAML alone.
+See [ca-recovery-workflow.md](ca-recovery-workflow.md) for the integrated training
+barrier, timeout behavior, separate probe accounting and runnable configurations.
+Real MNIST recovery and persistent-attack behavior must be evaluated from the
+uploaded receipts before drawing conclusions. Multi-exclusion scheduling and
+fairness remain outside this one-excluded-trainer pilot.

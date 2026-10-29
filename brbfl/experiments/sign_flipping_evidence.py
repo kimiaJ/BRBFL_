@@ -144,8 +144,16 @@ class AuditedModelUpdateAttack:
         }
         self.event_trace.append(event)
 
+    def active_in_round(self, round_number: int) -> bool:
+        """Apply a predeclared schedule to attack behavior, never detection."""
+        rounds = getattr(self, "active_rounds", None)
+        return rounds is None or round_number in rounds
+
     def publish_update(self, parameters: Sequence[Any]) -> list[np.ndarray]:
         """Freeze a benign local result, attack it once, and return a detached publication."""
+        if getattr(self, "active_rounds", None) is not None and not self.active_in_round(int(self._round_id())):
+            self.trace("benign_scheduled_publication")
+            return [_array(value) for value in parameters]
         benign = [_array(value) for value in parameters]
         benign_hash = canonical_parameter_hash(benign, self.parameter_names)
         round_id = self._round_id()

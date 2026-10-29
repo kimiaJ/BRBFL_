@@ -151,6 +151,9 @@ class TrainStage(Stage):
                 admitted_contributors = list(
                     wait_for_admitted_contributors(int(state.round), timeout=Settings.training.AGGREGATION_TIMEOUT)
                 )
+                from brbfl.ca.probe_workflow import recovery_probe_barrier
+
+                recovery_probe_barrier(state, learner, Settings.training.AGGREGATION_TIMEOUT)
                 # The completed admission ledger is the single owner of the
                 # configured-candidate -> expected-model transition.  In
                 # particular, a rejected local candidate must not be rejected
