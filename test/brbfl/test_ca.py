@@ -292,3 +292,66 @@ def test_hashes_cover_policy_topology_state_and_evidence_and_are_repeatable() ->
     neutral = dict.fromkeys(base.participant_states, EvidenceCategory.NEUTRAL)
     positive = dict(neutral, a=EvidenceCategory.POSITIVE)
     assert evolve(base, policy, neutral).snapshot_hash != evolve(base, policy, positive).snapshot_hash
+
+
+def test_bootstrap_preserves_legacy_hash_and_has_distinct_policy_identity():
+    assert CATransitionPolicy().policy_hash == '4cc42017f1618009fc8fdd8eacd8c46c289fc166e2cf9f62213d716cbcd2e676'
+    assert CATransitionPolicy(evidence_bootstrap_rounds=3).policy_hash != CATransitionPolicy().policy_hash
+
+
+@pytest.mark.parametrize('window', [-1, True, 1.5, '3', 2])
+def test_invalid_bootstrap_window_is_rejected(window):
+    with pytest.raises(ValueError, match='bootstrap'):
+        CATransitionPolicy(evidence_bootstrap_rounds=window)
+
+
+def test_bootstrap_requires_fresh_positive_history_and_trust():
+    policy = CATransitionPolicy(evidence_bootstrap_rounds=3)
+    snapshot = initialized(policy)
+    evidence = {'a': EvidenceCategory.POSITIVE, 'b': EvidenceCategory.POSITIVE, 'c': EvidenceCategory.NEUTRAL}
+    for number in range(3):
+        snapshot = evolve(snapshot, policy, evidence, {'a': .8, 'b': .6, 'c': .9}, round_number=number)
+        if number < 2:
+            assert all(s.state is ParticipantState.OBSERVATION for s in snapshot.participant_states.values())
+    assert snapshot.participant_states['a'].state is ParticipantState.TRUSTED
+    assert snapshot.participant_states['b'].state is ParticipantState.OBSERVATION
+    assert snapshot.participant_states['c'].state is ParticipantState.OBSERVATION
+    assert snapshot.transition_records[0].reason_code == 'observation_evidence_bootstrap'
+    assert snapshot.transition_records[0].neighbor_summary.trusted == 0
+    assert snapshot.verify_hash()
+
+
+def test_bootstrap_window_expires_without_trusted_nodes():
+    policy = CATransitionPolicy(evidence_bootstrap_rounds=3)
+    snapshot = initialized(policy)
+    for number in range(5):
+        evidence = EvidenceCategory.NEUTRAL if number == 0 else EvidenceCategory.POSITIVE
+        snapshot = evolve(snapshot, policy, dict.fromkeys('abc', evidence), round_number=number)
+    assert all(s.state is ParticipantState.OBSERVATION for s in snapshot.participant_states.values())
+
+
+def test_bootstrap_does_not_recover_or_promote_severe_offender():
+    policy = CATransitionPolicy(evidence_bootstrap_rounds=5)
+    snapshot = initialized(policy)
+    for number in range(5):
+        evidence = dict.fromkeys('abc', EvidenceCategory.POSITIVE)
+        if number == 0:
+            evidence['b'] = EvidenceCategory.SEVERE
+        snapshot = evolve(snapshot, policy, evidence, round_number=number)
+    assert snapshot.participant_states['b'].state is ParticipantState.EXCLUDED
+    assert snapshot.participant_states['a'].state is ParticipantState.TRUSTED
+
+
+def test_neighbor_support_is_required_again_after_bootstrap():
+    policy = CATransitionPolicy(evidence_bootstrap_rounds=3)
+    snapshot = initialized(policy)
+    positive = dict.fromkeys('abc', EvidenceCategory.POSITIVE)
+    for number in range(3):
+        snapshot = evolve(snapshot, policy, positive, {'a': .8, 'b': .6, 'c': .6}, round_number=number)
+    # Only a is trusted. b/c each have one trusted neighbor out of two.
+    supported = evolve(snapshot, policy, positive, round_number=3)
+    assert all(s.state is ParticipantState.TRUSTED for s in supported.participant_states.values())
+    assert supported.transition_records[1].reason_code == 'observation_promoted'
+    isolated = evolve(snapshot, policy, positive, graph={k: set() for k in 'abc'}, round_number=3)
+    assert isolated.participant_states['b'].state is ParticipantState.OBSERVATION
+    assert isolated.participant_states['c'].state is ParticipantState.OBSERVATION
