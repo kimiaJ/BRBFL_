@@ -27,6 +27,7 @@ from brbfl.selection.roles import (
     RoundRoleAssignment,
     SelectionContext,
     StaticRoundRoleSelector,
+    TrustRankedContributorSelector,
     TrustRankedValidatorSelector,
 )
 from brbfl.trust import TrustRuntime
@@ -58,6 +59,7 @@ class RuntimeLedgerConfig:
     ca_bootstrap_rounds: int = 1
     detector_target_counts: Mapping[str, int] = field(default_factory=dict)
     detector_capabilities: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    contributor_minimum_count: int = 3
 
 
 class RuntimeLedgerAdapter:
@@ -98,9 +100,11 @@ class RuntimeLedgerAdapter:
         self._ca_provenance: dict[int, CATransitionProvenance] = {}
         trust_population = config.validator_eligible_participants or self.validators
         self.validator_eligible_participants = tuple(sorted(trust_population))
-        if config.detector_target_counts:
+        if config.detector_target_counts or config.selection_strategy == "trust_contributors":
             trust_population = tuple(sorted(set(trust_population) | set(self.contributors)))
-        if config.selection_strategy == "trust_ranked" and (not config.trust_enabled or config.trust_observation_only):
+        if config.selection_strategy in ("trust_ranked", "trust_contributors") and (
+            not config.enabled or not config.trust_enabled or config.trust_observation_only
+        ):
             raise ValueError("trust-ranked selection requires enabled, enforcement-capable trust")
         self._trust = (
             TrustRuntime(experiment_id, trust_population, config.trust_prior_alpha, config.trust_prior_beta)
@@ -109,12 +113,12 @@ class RuntimeLedgerAdapter:
         )
         if config.ca_enabled and (not config.enabled or not config.trust_enabled):
             raise ValueError("CA requires enabled runtime ledger and finalized trust evidence")
-        if config.selection_strategy == "ca_state" and not config.ca_enabled:
+        if config.selection_strategy in ("ca_state", "ca_contributors") and not config.ca_enabled:
             raise ValueError("CA-state selection requires enabled CA")
-        if config.selection_strategy not in ("static", "trust_ranked", "ca_state"):
+        if config.selection_strategy not in ("static", "trust_ranked", "ca_state", "trust_contributors", "ca_contributors"):
             raise ValueError(f"unsupported role selection strategy: {config.selection_strategy}")
-        if config.detector_target_counts and config.selection_strategy != "ca_state":
-            raise ValueError("specialized detector selection requires CA-state selection")
+        if config.detector_target_counts and (not config.enabled or not config.trust_enabled):
+            raise ValueError("specialized detector requires ledger and trust")
         if set(config.detector_capabilities) - set(self.participants):
             raise ValueError("detector capabilities reference unknown participants")
         if config.ca_enabled:
@@ -154,7 +158,13 @@ class RuntimeLedgerAdapter:
                 capabilities[node] = capabilities[node] | frozenset({"detector", *specialized})
             self._ledger.register_participant(self.experiment_id, node, capabilities[node])
         self._capabilities = capabilities
-        self._selector = StaticRoundRoleSelector(self.contributors, self.validators, self.contributors)
+        groups = {}
+        for capability, count in sorted(self.config.detector_target_counts.items()):
+            eligible = sorted(node for node, caps in capabilities.items() if {"detector", capability} <= caps)
+            if type(count) is not int or count < 1 or len(eligible) < count:
+                raise ValueError("insufficient specialized detector candidates or invalid target")
+            groups[capability] = tuple(eligible[:count])
+        self._selector = StaticRoundRoleSelector(self.contributors, self.validators, self.contributors, groups)
         if self.config.selection_strategy == "trust_ranked":
             self._selector = TrustRankedValidatorSelector(
                 self._selector,
@@ -163,7 +173,14 @@ class RuntimeLedgerAdapter:
                 self.config.validator_minimum_trust,
                 self.config.validator_bootstrap_rounds,
             )
-        elif self.config.selection_strategy == "ca_state":
+        elif self.config.selection_strategy == "trust_contributors":
+            self._selector = TrustRankedContributorSelector(
+                self._selector,
+                max(3 if groups else 1, self.config.contributor_minimum_count),
+                self.config.validator_minimum_trust,
+                self.config.validator_bootstrap_rounds,
+            )
+        elif self.config.selection_strategy in ("ca_state", "ca_contributors"):
             self._selector = CAStateRoleSelector(
                 self._selector,
                 CARoleSelectionPolicy(
@@ -175,6 +192,7 @@ class RuntimeLedgerAdapter:
                     suspicious_contributors=self.config.ca_suspicious_contributors,
                     bootstrap_rounds=self.config.ca_bootstrap_rounds,
                     detector_target_counts=self.config.detector_target_counts,
+                    fixed_sensitive_roles=self.config.selection_strategy == "ca_contributors",
                 ),
             )
 
@@ -226,10 +244,13 @@ class RuntimeLedgerAdapter:
                         else {}
                     ),
                     ca_snapshot=ca_snapshot,
-                    source_trust_round=(ca_snapshot.source_round if ca_snapshot is not None and round_number > 0 else None),
+                    source_trust_round=(
+                        round_number - 1
+                        if self._trust is not None and round_number - 1 in self._trust.snapshots else None
+                    ),
                     source_trust_hash=(
-                        self._ca_provenance[round_number - 1].source_trust_snapshot_hash
-                        if round_number > 0 and round_number - 1 in self._ca_provenance
+                        self._trust.snapshots[round_number - 1].snapshot_sha256
+                        if self._trust is not None and round_number - 1 in self._trust.snapshots
                         else None
                     ),
                 )
@@ -431,7 +452,8 @@ class RuntimeLedgerAdapter:
             round_number = int(round_number)
             self._invoke(self._ledger.finalize_round, self.experiment_id, round_number)
             verified = self._invoke(self._ledger.verify_round, self.experiment_id, round_number)
-            if self.config.ca_enabled and verified is not True:
+            if (self.config.ca_enabled or self.config.selection_strategy == "trust_contributors"
+                    or self.config.detector_target_counts) and verified is not True:
                 raise RuntimeError("CA/trust cannot consume an unverified ledger round")
             if self._trust is not None and int(round_number) not in self._trust.snapshots:
                 record = self._ledger.get_round_record(self.experiment_id, int(round_number))

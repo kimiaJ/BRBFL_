@@ -244,6 +244,66 @@ class TrustRankedValidatorSelector(RoundRoleSelector):
         }
 
 
+class TrustRankedContributorSelector(RoundRoleSelector):
+    """Filter bootstrap trainers by prior finalized trust; keep sensitive roles fixed."""
+
+    def __init__(
+        self, bootstrap: StaticRoundRoleSelector, minimum_count: int = 3, minimum_trust: float = 0.5, bootstrap_rounds: int = 1
+    ) -> None:
+        self._bootstrap = bootstrap
+        self.minimum_count = minimum_count
+        self.minimum_trust = minimum_trust
+        self.bootstrap_rounds = bootstrap_rounds
+        if type(minimum_count) is not int or minimum_count < 1 or type(bootstrap_rounds) is not int or bootstrap_rounds < 1:
+            raise ValueError("contributor counts and bootstrap rounds must be positive integers")
+        if isinstance(minimum_trust, bool) or not math.isfinite(minimum_trust) or not 0 <= minimum_trust <= 1:
+            raise ValueError("invalid contributor minimum_trust")
+        self.policy_hash = canonical_hash(
+            "TrustRankedContributorPolicy/v1",
+            {
+                "minimum_count": minimum_count,
+                "minimum_trust": minimum_trust,
+                "bootstrap_rounds": bootstrap_rounds,
+                "tie_breaker": "node_id",
+                "insufficient_eligible_policy": "fail_closed",
+            },
+        )
+
+    def select_roles(self, context: SelectionContext) -> RoundRoleAssignment:
+        base = self._bootstrap.select_roles(context)
+        if context.round_number < self.bootstrap_rounds:
+            if len(base.selected_contributors) < self.minimum_count:
+                raise RuntimeError("insufficient bootstrap contributors")
+            return replace(base, policy_hash=self.policy_hash)
+        if context.source_trust_round != context.round_number - 1 or not context.source_trust_hash or not context.previous_state_hash:
+            raise RuntimeError("finalized prior-round trust provenance is unavailable or stale")
+        pool = base.selected_contributors
+        scores = context.trust_scores
+        if any(
+            node not in scores
+            or isinstance(scores[node], bool)
+            or not isinstance(scores[node], int | float)
+            or not math.isfinite(scores[node])
+            or not 0 <= scores[node] <= 1
+            for node in pool
+        ):
+            raise RuntimeError("complete finite contributor trust scores are required")
+        selected = tuple(sorted((node for node in pool if scores[node] >= self.minimum_trust), key=lambda node: (-scores[node], node)))
+        if len(selected) < self.minimum_count:
+            raise RuntimeError("insufficient trust-eligible contributors")
+        assignment = replace(
+            base,
+            selected_contributors=selected,
+            aggregation_eligible_nodes=tuple(node for node in base.aggregation_eligible_nodes if node in selected),
+            selection_source="trust_contributors",
+            source_trust_round=context.source_trust_round,
+            source_trust_hash=context.source_trust_hash,
+            policy_hash=self.policy_hash,
+        )
+        validate_capabilities(assignment, context.participant_capabilities)
+        return assignment
+
+
 @dataclass(frozen=True, slots=True)
 class CARoleSelectionPolicy:
     """Deterministic eligibility and cardinality constraints for CA selection."""
@@ -256,6 +316,7 @@ class CARoleSelectionPolicy:
     suspicious_contributors: bool = True
     bootstrap_rounds: int = 1
     detector_target_counts: Mapping[str, int] = field(default_factory=dict)
+    fixed_sensitive_roles: bool = False
 
     def __post_init__(self) -> None:
         groups = dict(sorted(self.detector_target_counts.items()))
@@ -296,6 +357,7 @@ class CARoleSelectionPolicy:
                 "state_priority": [state.value for state in ParticipantState],
                 "tie_breaker": "participant_id",
                 **({"detector_target_counts": dict(self.detector_target_counts)} if self.detector_target_counts else {}),
+                **({"fixed_sensitive_roles": True} if self.fixed_sensitive_roles else {}),
             },
         )
 
@@ -310,6 +372,8 @@ class CAStateRoleSelector(RoundRoleSelector):
     def select_roles(self, context: SelectionContext) -> RoundRoleAssignment:
         if context.round_number < self.policy.bootstrap_rounds:
             base = self._bootstrap.select_roles(context)
+            if self.policy.fixed_sensitive_roles:
+                return replace(base, policy_hash=self.policy.policy_hash)
             if not self.policy.detector_target_counts:
                 return base
             groups = {}
@@ -360,7 +424,8 @@ class CAStateRoleSelector(RoundRoleSelector):
         if self.policy.suspicious_contributors:
             contributor_states += (ParticipantState.SUSPICIOUS,)
         contributors = ranked(CONTRIBUTOR, contributor_states)
-        validators = ranked(VALIDATOR, (ParticipantState.TRUSTED, ParticipantState.OBSERVATION))
+        fixed = self._bootstrap.select_roles(context) if self.policy.fixed_sensitive_roles else None
+        validators = fixed.selected_validators if fixed else ranked(VALIDATOR, (ParticipantState.TRUSTED, ParticipantState.OBSERVATION))
         # Detector rounds may shrink after exclusion, but must retain enough
         # published models for the unchanged median-reference policy.
         required = (
@@ -376,6 +441,12 @@ class CAStateRoleSelector(RoundRoleSelector):
         selected_validators = validators[: self.policy.validator_target_count]
         groups = {}
         for capability, count in self.policy.detector_target_counts.items():
+            if fixed is not None:
+                members = fixed.detector_subgroups.get(capability, ())
+                if len(members) != count:
+                    raise RuntimeError("fixed committee does not match configured target")
+                groups[capability] = members
+                continue
             eligible = tuple(
                 node
                 for node in ranked(capability, (ParticipantState.TRUSTED, ParticipantState.OBSERVATION))
@@ -405,7 +476,7 @@ class CAStateRoleSelector(RoundRoleSelector):
             ),
             selected_contributors=selected_contributors,
             selected_validators=selected_validators,
-            selection_source="ca_state",
+            selection_source="ca_contributors" if fixed else "ca_state",
             source_ca_generation=snapshot.generation,
             source_ca_snapshot_hash=snapshot.snapshot_hash,
             source_trust_round=context.source_trust_round,
