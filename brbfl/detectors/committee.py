@@ -41,6 +41,7 @@ def finalize_detector_committee(
     participant_id: str,
     source_artifact_hash: str,
     evidence: tuple[DetectorEvidence, ...],
+    *, audit_subjects: tuple[str, ...] = (),
 ) -> DetectorCommitteeDecision:
     """
     Require a strict committee majority for one verified evidence category.
@@ -53,7 +54,7 @@ def finalize_detector_committee(
     members = assignment.detector_subgroups.get(capability, ())
     if not members:
         raise ValueError("specialized committee is absent")
-    if participant_id not in assignment.selected_contributors:
+    if participant_id not in assignment.selected_contributors and participant_id not in audit_subjects:
         raise ValueError("evaluated participant is not a selected contributor")
     if len(source_artifact_hash) != 64 or any(c not in "0123456789abcdef" for c in source_artifact_hash):
         raise ValueError("invalid source artifact hash")

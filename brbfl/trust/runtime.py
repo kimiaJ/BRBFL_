@@ -52,6 +52,7 @@ class TrustRuntime:
         candidates: Iterable[str],
         decisions: Iterable[Mapping[str, Any]],
         detector_decisions: Iterable[Mapping[str, Any]] = (),
+        recovery_decisions: Iterable[Mapping[str, Any]] = (),
     ) -> RoundTrustSnapshot:
         if isinstance(round_id, bool) or not isinstance(round_id, int) or round_id < 0:
             raise ValueError("round_id must be a non-negative canonical integer")
@@ -107,7 +108,11 @@ class TrustRuntime:
         payload = self._snapshot_payload(round_id, pre, ordered, post)
         detector_updates = []
         seen = set()
-        for raw in sorted(detector_decisions, key=lambda row: (row["capability"], row["participant_id"])):
+        probes = tuple(recovery_decisions)
+        probe_subjects = {row["participant_id"] for row in probes}
+        if probe_subjects & set(candidate_ids):
+            raise RuntimeError("probe subjects cannot also be training candidates")
+        for raw in sorted((*detector_decisions, *probes), key=lambda row: (row["capability"], row["participant_id"])):
             row = dict(raw)
             digest = row.pop("decision_hash", None)
             if digest != canonical_hash("DetectorCommitteeDecision/v1", row):
@@ -115,7 +120,7 @@ class TrustRuntime:
             participant = row.get("participant_id")
             category = row.get("category")
             key = (row.get("capability"), participant)
-            if participant not in post or participant not in candidate_ids or key in seen:
+            if participant not in post or participant not in set(candidate_ids) | probe_subjects or key in seen:
                 raise RuntimeError("unknown or duplicate detector trust subject")
             if category not in ("positive", "negative", "severe", "neutral"):
                 raise RuntimeError("invalid detector evidence category")

@@ -24,6 +24,7 @@ class _Round:
     aggregate: dict[str, Any] | None = None
     installations: dict[str, str] = field(default_factory=dict)
     finalized: bool = False
+    recovery_probes: dict[str, dict[str, Any]] = field(default_factory=dict)
     detector_committees: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
 
 
@@ -153,6 +154,31 @@ class InMemoryLedger(BlockchainLedger):
             return self._idempotent(EventType.DETECTOR_COMMITTEE_COMMITTED, experiment_id, payload, round_number, participant_id)
         receipt = self._append(EventType.DETECTOR_COMMITTEE_COMMITTED, experiment_id, payload, round_number, participant_id)
         record.detector_committees[key] = payload
+        return receipt
+
+    def commit_recovery_probe(self, experiment_id, round_number, participant_id, parent_model_hash,
+                              source_artifact_hash, evidence):
+        """Keep probe decisions outside candidates, admission and aggregation."""
+        record = self._round(experiment_id, round_number)
+        if record.admission is None or record.parent_model_hash != parent_model_hash:
+            raise RuntimeError("probe requires finalized admission and the current parent")
+        registered = self._experiment(experiment_id).participants
+        if participant_id not in registered or participant_id in record.assignment.selected_contributors:
+            raise ValueError("probe subject must be registered and not selected")
+        capability = "model_update_detector"
+        for member in record.assignment.detector_subgroups.get(capability, ()):
+            if not {"detector", capability} <= registered[member]:
+                raise ValueError("probe committee lacks capability")
+        decision = finalize_detector_committee(record.assignment, capability, participant_id, source_artifact_hash,
+                                              evidence, audit_subjects=(participant_id,))
+        payload = {"parent_model_hash": parent_model_hash, "decision": decision.artifact(),
+                   "evidence": [row.artifact() for row in sorted(evidence, key=lambda row: row.detector_id)]}
+        if participant_id in record.recovery_probes:
+            if record.recovery_probes[participant_id] != payload:
+                raise RuntimeError("conflicting recovery probe")
+            return self._idempotent(EventType.RECOVERY_PROBE_COMMITTED, experiment_id, payload, round_number, participant_id)
+        receipt = self._append(EventType.RECOVERY_PROBE_COMMITTED, experiment_id, payload, round_number, participant_id)
+        record.recovery_probes[participant_id] = payload
         return receipt
 
     def start_experiment(self, experiment_id: str, required_installers: tuple[str, ...]) -> LedgerReceipt:
@@ -405,6 +431,7 @@ class InMemoryLedger(BlockchainLedger):
                 "aggregate": record.aggregate,
                 "installations": record.installations,
                 "finalized": record.finalized,
+                **({"recovery_probes": deepcopy(record.recovery_probes)} if record.recovery_probes else {}),
                 **({"detector_committees": [deepcopy(value) for _, value in sorted(record.detector_committees.items())]}
                    if record.detector_committees else {}),
             }
@@ -473,6 +500,8 @@ class InMemoryLedger(BlockchainLedger):
                     "aggregate": experiment.rounds[number].aggregate,
                     "installation_confirmations": dict(sorted(experiment.rounds[number].installations.items())),
                     "finalized": experiment.rounds[number].finalized,
+                    **({"recovery_probes": deepcopy(experiment.rounds[number].recovery_probes)}
+                       if experiment.rounds[number].recovery_probes else {}),
                     **(
                         {"detector_committees": [
                             deepcopy(value) for _, value in sorted(experiment.rounds[number].detector_committees.items())
