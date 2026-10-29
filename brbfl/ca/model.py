@@ -90,9 +90,18 @@ class CATransitionPolicy:
     require_undirected_topology: bool = True
     allow_self_neighbors: bool = False
     severe_trusted_target: ParticipantState = ParticipantState.SUSPICIOUS
+    evidence_bootstrap_rounds: int = 0
 
     def __post_init__(self) -> None:
         """Validate policy invariants."""
+        if (
+            isinstance(self.evidence_bootstrap_rounds, bool)
+            or not isinstance(self.evidence_bootstrap_rounds, int)
+            or self.evidence_bootstrap_rounds < 0
+        ):
+            raise ValueError("evidence_bootstrap_rounds must be a non-negative integer")
+        if self.evidence_bootstrap_rounds and not 0 < self.promotion_positive_rounds <= self.evidence_bootstrap_rounds:
+            raise ValueError("evidence bootstrap requires positive promotion history within its window")
         integer_thresholds = (
             self.promotion_positive_rounds,
             self.recovery_positive_rounds,
@@ -114,7 +123,12 @@ class CATransitionPolicy:
     @property
     def policy_hash(self) -> str:
         """Return the domain-separated hash of this policy."""
-        return canonical_hash("ca-transition-policy-v1", _dataclass_payload(self))
+        payload = _dataclass_payload(self)
+        if not self.evidence_bootstrap_rounds:
+            # Preserve the policy and snapshot hashes of the recorded v1 pilot.
+            payload.pop("evidence_bootstrap_rounds")
+            return canonical_hash("ca-transition-policy-v1", payload)
+        return canonical_hash("ca-transition-policy-v2", payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,7 +308,9 @@ class CATransitionEngine:
             summary = _neighbor_summary(topology[participant_id], previous.participant_states)
             positive = old.consecutive_positive_rounds + 1 if evidence is EvidenceCategory.POSITIVE else 0
             negative = old.consecutive_negative_rounds + 1 if evidence in (EvidenceCategory.NEGATIVE, EvidenceCategory.SEVERE) else 0
-            next_state, reason = _next_state(old, evidence, float(trust), positive, negative, summary, policy)
+            next_state, reason = _next_state(
+                old, evidence, float(trust), positive, negative, summary, policy, transition_input.source_round
+            )
             changed = next_state is not old.state
             unresolved_severe = old.unresolved_severe_since_round
             if old.state in (ParticipantState.OBSERVATION, ParticipantState.TRUSTED) and (
@@ -423,6 +439,7 @@ def _next_state(
     negative: int,
     neighbors: NeighborStateSummary,
     policy: CATransitionPolicy,
+    source_round: int,
 ) -> tuple[ParticipantState, str]:
     state = old.state
     if state is ParticipantState.OBSERVATION:
@@ -434,9 +451,11 @@ def _next_state(
             evidence is EvidenceCategory.POSITIVE
             and positive >= policy.promotion_positive_rounds
             and trust >= policy.promotion_min_trust
-            and _supported(neighbors, policy)
         ):
-            return ParticipantState.TRUSTED, "observation_promoted"
+            if _supported(neighbors, policy):
+                return ParticipantState.TRUSTED, "observation_promoted"
+            if source_round < policy.evidence_bootstrap_rounds:
+                return ParticipantState.TRUSTED, "observation_evidence_bootstrap"
     elif state is ParticipantState.TRUSTED:
         if evidence is EvidenceCategory.SEVERE:
             return policy.severe_trusted_target, "trusted_severe"

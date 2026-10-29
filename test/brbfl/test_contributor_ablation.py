@@ -6,6 +6,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+from brbfl.ca import CATransitionPolicy, ParticipantState
 from brbfl.ledger.runtime import RuntimeLedgerAdapter, RuntimeLedgerConfig, clear_runtime_ledger, install_runtime_ledger
 from brbfl.selection import SelectionContext, StaticRoundRoleSelector, TrustRankedContributorSelector
 from brbfl.validation.byzantine_gate import (
@@ -23,9 +24,10 @@ TRAINERS, VALIDATORS = NODES[:4], NODES[4:]
 CAPABILITY = "model_update_detector"
 
 
+@pytest.mark.parametrize("bootstrap", [False, True])
 @pytest.mark.parametrize("strategy", ["static", "trust_contributors", "ca_contributors"])
 @pytest.mark.parametrize("attacked", [False, True])
-def test_three_rounds_keep_sensitive_roles_and_detector_fixed(strategy, attacked):
+def test_three_rounds_keep_sensitive_roles_and_detector_fixed(strategy, attacked, bootstrap):
     """All modes reject the same malicious model but may stop selecting its owner at different rounds."""
     runtime = RuntimeLedgerAdapter(
         RuntimeLedgerConfig(
@@ -34,6 +36,7 @@ def test_three_rounds_keep_sensitive_roles_and_detector_fixed(strategy, attacked
             trust_observation_only=False,
             selection_strategy=strategy,
             ca_enabled=strategy == "ca_contributors",
+            ca_policy=CATransitionPolicy(evidence_bootstrap_rounds=3 if bootstrap else 0),
             validator_eligible_participants=VALIDATORS,
             contributor_minimum_count=3,
             ca_minimum_contributors=3,
@@ -86,6 +89,14 @@ def test_three_rounds_keep_sensitive_roles_and_detector_fixed(strategy, attacked
                 runtime.confirm_installation(number, node, parent)
             runtime.finalize_round(number)
             assert runtime.validation_artifact()["round_verification"][str(number)]
+        if strategy == "ca_contributors":
+            snapshot = runtime.ca_snapshot_for_round(3)
+            for node in NODES:
+                expected_state = (ParticipantState.EXCLUDED if attacked and node == "b" else
+                                  ParticipantState.TRUSTED if bootstrap else ParticipantState.OBSERVATION)
+                assert snapshot.participant_states[node].state is expected_state
+            runtime.open_round(3, parent)
+            assert runtime.role_assignment(3).source_ca_snapshot_hash == snapshot.snapshot_hash
         expected = [True, True, True]
         if attacked and strategy == "trust_contributors":
             expected = [True, False, False]
@@ -234,3 +245,25 @@ def test_prepared_matrix_controls_inputs_and_uses_unique_output_paths(tmp_path):
     assert all(row == controlled[0] for row in controlled)
     with pytest.raises(FileExistsError):
         prepare(tmp_path / "configs")
+
+
+def test_bootstrap_configs_bind_policy_and_control_all_other_inputs():
+    """The executable pair changes only its policy window and output path."""
+    from pathlib import Path
+
+    import yaml
+
+    from brbfl.experiments.config import load_experiment_config
+
+    root = Path(__file__).resolve().parents[2] / 'configs/ablation/ca-bootstrap'
+    for scenario in ('clean', 'attacked'):
+        baseline = root / f'baseline_{scenario}_666.yaml'
+        evidence = root / f'evidence_{scenario}_666.yaml'
+        assert load_experiment_config(baseline).ca.policy.evidence_bootstrap_rounds == 0
+        assert load_experiment_config(evidence).ca.policy.evidence_bootstrap_rounds == 3
+        left, right = (yaml.safe_load(p.read_text()) for p in (baseline, evidence))
+        assert left.pop('output_dir') != right.pop('output_dir')
+        left['ca']['policy'].pop('evidence_bootstrap_rounds')
+        right['ca']['policy'].pop('evidence_bootstrap_rounds')
+        assert left == right
+        assert left['rounds'] == 4
