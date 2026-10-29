@@ -15,6 +15,7 @@ from brbfl.ca import (
     CATransitionPolicy,
     CATransitionProvenance,
     FinalizedTrustEvidenceMapper,
+    ParticipantState,
 )
 from brbfl.canonical import canonical_hash
 from brbfl.detectors.evidence import DetectorEvidence
@@ -60,6 +61,7 @@ class RuntimeLedgerConfig:
     detector_target_counts: Mapping[str, int] = field(default_factory=dict)
     detector_capabilities: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     contributor_minimum_count: int = 3
+    recovery_probes_enabled: bool = False
 
 
 class RuntimeLedgerAdapter:
@@ -76,6 +78,12 @@ class RuntimeLedgerAdapter:
         ca_evidence_mapper: CAEvidenceMapper | None = None,
     ) -> None:
         """Initialize and, when enabled, register the canonical experiment."""
+        if config.recovery_probes_enabled and (
+            not config.enabled or not config.trust_enabled or not config.ca_enabled
+            or not config.ca_policy.recovery_enabled or config.selection_strategy != "ca_contributors"
+            or not config.ca_suspicious_contributors or not config.detector_target_counts.get("model_update_detector")
+        ):
+            raise ValueError("recovery probes require fixed-role CA, detector, recovery and suspicious trainer eligibility")
         self.config = config
         self.experiment_id = experiment_id
         self.participants = tuple(sorted(participants))
@@ -331,6 +339,52 @@ class RuntimeLedgerAdapter:
                 raise RuntimeError("model-update detection failed") from self._detector_errors[round_number]
             return self._detector_results[round_number][participant_id]
 
+    def recovery_probe_subjects(self, round_number: int) -> tuple[str, ...]:
+        """Schedule at most one eligible excluded trainer from prior finalized state."""
+        if not self.config.recovery_probes_enabled:
+            return ()
+        if not self.config.ca_enabled or not self.config.ca_policy.recovery_enabled:
+            raise RuntimeError("recovery probes require CA and recovery enabled")
+        assignment = self.role_assignment(round_number)
+        snapshot = self.ca_snapshot_for_round(round_number)
+        eligible = sorted(node for node in self.contributors
+                          if node not in assignment.selected_contributors
+                          and snapshot.participant_states[node].state is ParticipantState.EXCLUDED
+                          and snapshot.participant_states[node].rounds_in_state >= self.config.ca_policy.excluded_cooldown_rounds)
+        # Rotate deterministically; eligibility is based only on prior evidence.
+        return (eligible[round_number % len(eligible)],) if eligible else ()
+
+    def submit_recovery_probe(self, round_number: int, participant_id: str, parent_model_hash: str, parameters: list):
+        """Evaluate an audit-only submission against this round's admitted models."""
+        from brbfl.validation.byzantine_gate import canonical_parameters, parameter_hash
+
+        with self._lock:
+            if participant_id not in self.recovery_probe_subjects(round_number):
+                raise ValueError("participant is not scheduled for a recovery probe")
+            if self._ledger is None:
+                raise RuntimeError("probe requires ledger")
+            record = self._ledger.get_round_record(self.experiment_id, round_number)
+            if record["finalized"] or record["admission"] is None or parent_model_hash != record["parent_model_hash"]:
+                raise RuntimeError("probe requires open round, finalized admission and current parent")
+            admitted = {node: self._detector_models[round_number][node]
+                        for node, yes in record["admission"].items() if yes}
+            reference, reference_hash = median_reference(admitted)
+            values = canonical_parameters(parameters)
+            source_hash = parameter_hash(values)
+            assignment = self.role_assignment(round_number)
+            evidence = tuple(replace(SignFlippingDetector(member).evaluate(
+                experiment_id=self.experiment_id, round_number=round_number,
+                detector_assignment_hash=assignment.assignment_hash,
+                evaluated_participant_id=participant_id, candidate_update=values, reference_update=reference,
+            ), source_artifact_hash=source_hash) for member in assignment.detector_subgroups["model_update_detector"])
+            evidence = tuple(replace(row, measurement_hash=canonical_hash("RecoveryProbeMeasurement/v1", {
+                "measurement_hash": row.measurement_hash, "reference_hash": reference_hash,
+                "parent_model_hash": parent_model_hash,
+            })) for row in evidence)
+            self._ledger.commit_recovery_probe(self.experiment_id, round_number, participant_id,
+                                               parent_model_hash, source_hash, evidence)
+            return self._ledger.get_round_record(self.experiment_id, round_number)["recovery_probes"][participant_id]
+
     def record_detector_committee(
         self, round_number: int, capability: str, participant_id: str,
         source_artifact_hash: str, evidence: tuple[DetectorEvidence, ...],
@@ -472,6 +526,7 @@ class RuntimeLedgerAdapter:
                     record["candidates"],
                     decisions,
                     detector_decisions=[row["decision"] for row in record.get("detector_committees", ())],
+                    recovery_decisions=[row["decision"] for row in record.get("recovery_probes", {}).values()],
                 )
             if self.config.ca_enabled and round_number not in self._ca_provenance:
                 self._finalize_ca(round_number)

@@ -25,6 +25,7 @@ class EventType(str, Enum):
     MODEL_INSTALLATION_CONFIRMED = "ModelInstallationConfirmed"
     ROUND_FINALIZED = "RoundFinalized"
     CA_TRANSITION_COMMITTED = "CATransitionCommitted"
+    RECOVERY_PROBE_COMMITTED = "RecoveryProbeCommitted"
     DETECTOR_COMMITTEE_COMMITTED = "DetectorCommitteeCommitted"
 
 
@@ -61,6 +62,11 @@ class BlockchainLedger(ABC):
         self, experiment_id: str, round_number: int, capability: str, participant_id: str,
         source_artifact_hash: str, evidence: tuple[DetectorEvidence, ...],
     ) -> LedgerReceipt: ...
+
+    def commit_recovery_probe(self, experiment_id, round_number, participant_id, parent_model_hash,
+                              source_artifact_hash, evidence):
+        """Commit an audit-only model assessment; unsupported backends fail closed."""
+        raise NotImplementedError("recovery probes are not supported by this ledger")
 
     @abstractmethod
     def start_experiment(self, experiment_id: str, required_installers: tuple[str, ...]) -> LedgerReceipt: ...
