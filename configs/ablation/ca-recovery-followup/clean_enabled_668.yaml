@@ -1,0 +1,69 @@
+nodes: 6
+rounds: 12
+epochs: 1
+seed: 668
+protocol: memory
+framework: pytorch
+aggregator: fedavg
+topology: full
+batch_size: 128
+show_metrics: false
+save_csv: true
+output_dir: results/ca-recovery-followup/668/clean_enabled
+eligible_trainers:
+- node-0
+- node-1
+- node-2
+- node-3
+dataset:
+  name: p2pfl/MNIST
+  distribution: iid
+  reduced: true
+  partition_multiplier: 50
+validation:
+  enabled: true
+  contributors:
+  - node-0
+  - node-1
+  - node-2
+  - node-3
+  validators:
+  - node-4
+  - node-5
+  quorum: 2
+  acceptance_threshold: 2
+blockchain:
+  enabled: true
+  backend: memory
+  fail_closed: true
+trust:
+  enabled: true
+  observation_only: false
+  prior_alpha: 1
+  prior_beta: 1
+selection:
+  strategy: ca_contributors
+  eligible_participants:
+  - node-4
+  - node-5
+  bootstrap_rounds: 1
+  minimum_trust: 0.5
+  minimum_contributors: 3
+ca:
+  enabled: true
+  minimum_contributors: 3
+  suspicious_contributors: true
+  policy:
+    severe_suspicious_probation_rounds: 1
+    recovery_enabled: true
+    evidence_bootstrap_rounds: 3
+  recovery_probes_enabled: true
+model_detector:
+  enabled: true
+  committee_size: 2
+  eligible_participants:
+  - node-4
+  - node-5
+attack:
+  name: none
+  adversaries: []
